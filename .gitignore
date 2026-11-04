@@ -1,0 +1,14 @@
+/.docker-stage/
+/iis-data/
+/iis-site/bin/
+/iis-helper/python-deps/
+/iis-helper/*.exe
+/iis-helper/node_modules/
+/iis-helper/__pycache__/
+*.pyc
+*.log
+*.pfx
+*.pem
+*secret*.json
+*credential*.json
+

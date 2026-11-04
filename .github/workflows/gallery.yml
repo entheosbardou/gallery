@@ -1,0 +1,41 @@
+name: Gallery build and deploy
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+    inputs:
+      deploy:
+        description: Deploy the built release to bens-pc
+        type: boolean
+        default: false
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.14'
+      - name: Build release
+        shell: powershell
+        run: ./deploy/Build-Release.ps1
+      - uses: actions/upload-artifact@v4
+        with:
+          name: gallery-release
+          path: .docker-stage/release
+          if-no-files-found: error
+  deploy:
+    if: github.event_name == 'workflow_dispatch' && inputs.deploy
+    needs: build
+    runs-on: [self-hosted, Windows, gallery]
+    environment: production
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: gallery-release
+          path: .docker-stage/release
+      - name: Deploy to the existing IIS site
+        shell: powershell
+        run: ./deploy/Deploy-OnHost.ps1 -ReleasePath .docker-stage/release

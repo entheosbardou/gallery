@@ -1,0 +1,15 @@
+.git
+.github
+.docker-stage
+README.md
+deploy
+*.log
+*.pem
+*.pfx
+iis-data
+iis-site/bin
+iis-helper/python-deps
+iis-helper/*.exe
+iis-helper/node_modules
+iis-helper/__pycache__
+

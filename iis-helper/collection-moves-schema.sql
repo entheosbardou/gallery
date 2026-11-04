@@ -1,0 +1,4 @@
+CREATE TABLE IF NOT EXISTS fm_collection_moves (
+ id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,entry_id BIGINT UNSIGNED NOT NULL,source_document_id BIGINT UNSIGNED NOT NULL,target_collection_id BIGINT UNSIGNED NOT NULL,state ENUM('pending','running','completed','failed') NOT NULL DEFAULT 'pending',error TEXT NULL,created_at DATETIME(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6),completed_at DATETIME(6) NULL,KEY work(state,id),KEY entry_moves(entry_id,id));
+CREATE TABLE IF NOT EXISTS fm_collection_move_files(move_id BIGINT UNSIGNED NOT NULL,file_id BIGINT UNSIGNED NOT NULL,operation_id BIGINT UNSIGNED NULL,state ENUM('pending','completed') NOT NULL DEFAULT 'pending',PRIMARY KEY(move_id,file_id),KEY operation_owner(operation_id));
+CREATE TABLE IF NOT EXISTS fm_file_placement(file_id BIGINT UNSIGNED PRIMARY KEY,collection_id BIGINT UNSIGNED NOT NULL);
