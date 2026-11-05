@@ -1,6 +1,13 @@
-## 2026-11-05 — External collection categories in source
+## 2026-11-05 11:35 -07:00 � Recovery worker failure isolation deployed
 
-- The collection endpoint now returns accessible categories beside collection keys, without media items. The media endpoint accepts an optional exact category filter in addition to its collection filter. The release built locally; this change has not been deployed or verified with an authenticated live request.
+- Live log showed recovery operation 12719 repeatedly aborting the worker startup pass with `Both paths absent`. Source now records an individual recovery operation error and continues to the next operation. Recovery operations can be held and resumed from the administrator review dialog without changing file bytes or links.
+- Built the release locally (Python syntax, JavaScript syntax, and IIS compilation passed) and deployed to `bens-pc` after `Deploy-OnHost.ps1 -ValidateOnly` passed. Backup: `C:\downloads\gallery\change-backups\github-release-20261105-113422`. The live worker source hash matched the release and the scheduled worker was Running immediately after deployment.
+- The log tail still contained the earlier startup failures. Completion of the next recovery pass and resolution of operation 12719 remain unverified. The missing files need separate evidence-based review; this release does not delete or relink them.
+
+## 2026-11-05 10:51 -07:00 — External collection categories deployed
+
+- Built commit `cbe648b` in an isolated worktree and deployed the release to `bens-pc` after `Deploy-OnHost.ps1 -ValidateOnly` passed. Backup: `C:\downloads\gallery\change-backups\github-release-20261105-104804`. The live `WallpaperGallery.dll` SHA256 matches the release (`BB2FEE1055C529811822E882B51D45A73C321090BD93CE9D11DC061ECA997B6F`). Immediately afterward, the Gallery app pool was Started, the database worker task was Running, and an unauthenticated collection request returned 401.
+- The collection endpoint now returns accessible categories beside collection keys, without media items. The media endpoint accepts an optional exact category filter. An authenticated check through Open Wallpaper could not reach Gallery because its stored OIDC credential failed the identity match check; category payload and UI behavior remain unverified live. No account link or credential was changed.
 
 ## 2026-11-05 09:19 -07:00 — External collection API deployed
 

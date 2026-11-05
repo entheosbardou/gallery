@@ -62,6 +62,7 @@ public class GalleryHandler : IHttpHandler {
             var payload=Gallery.Json.Deserialize<Dictionary<string,object>>(new StreamReader(c.Request.InputStream).ReadToEnd());
             if(payload==null) throw new GalleryError(400,"Invalid request.");
             if(route=="access-settings") { Reply(c,200,Gallery.SaveAccessPolicy(c,payload));return; }
+            if(route=="hold-recovery-operation") { if(!GalleryAuth.IsAdmin(c))throw new GalleryError(403,"Only gallery administrators can hold file operations.");Reply(c,200,Gallery.DatabaseHoldRecoveryOperation(payload));return; }
             if(route=="keep-both-recovery") { if(!GalleryAuth.IsAdmin(c))throw new GalleryError(403,"Only gallery administrators can resolve file operations.");Reply(c,200,Gallery.DatabaseKeepBothRecoveryOperation(payload));return; }
             if(route=="export-inventory") { Reply(c,200,Gallery.ExportDatabaseInventory(Gallery.Text(payload,"collection")));return; }
             if(route=="import-updates") { Gallery.RequestDatabaseImportUpdates(); Reply(c,202,Gallery.RequestDatabaseWorker());return; }

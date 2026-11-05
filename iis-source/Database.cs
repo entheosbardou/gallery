@@ -113,6 +113,19 @@ public static partial class Gallery {
    tx.Commit();return new{status="cancelled",message="Both verified files were kept. The pending deduplication was cancelled."};
   }
  }
+ public static object DatabaseHoldRecoveryOperation(Dictionary<string,object> payload){
+  long id;if(!Int64.TryParse(Text(payload,"id"),out id)||id<1)throw new GalleryError(400,"Choose a file operation.");
+  bool hold=Text(payload,"hold")=="True";
+  using(var db=OpenDatabase())using(var tx=db.BeginTransaction()){
+   var rows=DBRows(db,tx,"SELECT state,error FROM file_operations WHERE id=@id FOR UPDATE","@id",id);
+   if(rows.Count!=1||Text(rows[0],"state")!="error")throw new GalleryError(409,"This operation is no longer waiting for review.");
+   string error=Text(rows[0],"error");
+   if(hold&&!error.StartsWith("On hold: "))error="On hold: "+error;
+   if(!hold&&error.StartsWith("On hold: "))error=error.Substring(9);
+   DBExec(db,tx,"UPDATE file_operations SET error=@error WHERE id=@id","@error",error,"@id",id);
+   tx.Commit();return new{message=hold?"Operation held for review. Files and links were not changed.":"Operation resumed for the next recovery pass."};
+  }
+ }
  public static object ClearDatabaseIssues(){var result=new{phase="idle",message="Scan issues cleared. Use Retry scan issues to check the files again.",issues=new object[0]};SetDatabaseState("worker_status",result);return result;}
  public static object RetryDatabaseIssues(){var status=DatabaseState("worker_status") as Dictionary<string,object>;if(status!=null&&status.ContainsKey("issues")){var issues=Json.Deserialize<List<Dictionary<string,object>>>(Json.Serialize(status["issues"]));using(var db=OpenDatabase())foreach(var issue in issues){string path=Text(issue,"file");if(path!="")DBExec(db,null,"INSERT IGNORE INTO fm_file_dirty(file_id) SELECT id FROM files WHERE relative_path=@path AND is_present=TRUE","@path",path);}}return RequestDatabaseWorker();}
  static GalleryFileReference DatabaseExistingContent(string hash,long size){using(var db=OpenDatabase())foreach(var file in DBRows(db,null,"SELECT f.relative_path,c.collection_key FROM file_hashes h JOIN fm_file_catalog f ON f.id=h.file_id JOIN collections c ON c.id=f.collection_id WHERE h.hash_kind='file_sha256' AND h.hash_value=UNHEX(@hash) AND f.byte_size=@size AND h.source_modified_utc_ticks=f.modified_utc_ticks AND f.is_present=TRUE AND f.canonical_file_id IS NULL","@hash",hash,"@size",size)){string owner=Text(file,"collection_key"),name=owner=="."?Text(file,"relative_path"):Text(file,"relative_path").Substring(owner.Length+1);var c=Find(owner);string path=SafeFile(c,name);if(path!=null&&File.Exists(path)){using(var stream=new FileStream(path,FileMode.Open,FileAccess.Read,FileShare.Read))if(stream.Length==size&&HashStream(stream)==hash)return new GalleryFileReference{Owner=c,Name=name,Path=path};}}return null;}

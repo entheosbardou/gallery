@@ -699,98 +699,107 @@ def recover(db):
  review_issues=[{'file':r['source_path'],'error':'Operation '+str(r['id'])+' needs review: source missing and retained file has different bytes'} for r in q(db,"SELECT id,source_path FROM file_operations WHERE state='error' AND error='Missing source has different bytes; recovery needs review' ORDER BY id LIMIT 10")]
  for index,op in enumerate(ops):
   if index%10==0:progress(db,'Recovering file operations',index,total,recovery_processed=index,recovery_total=total,recovery_review=review,issues=review_issues)
-  if q(db,'SELECT move_id FROM fm_collection_move_files WHERE operation_id=%s LIMIT 1',(op['id'],)):continue
-  if not FMW.can_manage(db,op['source_path'])[0]:continue
-  if not FMW.can_relocate(db,op['source_file_id'],op['target_path'])[0]:continue
-  if op['operation_kind']=='organize':
-   current=q(db,'SELECT f.*,c.collection_key AS owner FROM fm_file_catalog f JOIN collections c ON c.id=f.collection_id WHERE f.id=%s',(op['source_file_id'],))[0]
-   if current['relative_path'] not in [op['source_path'],op['target_path']]:
-    current_path=safe(current['relative_path'])
-    if current_path.exists() and filehash(current_path)==bytes(op['source_sha256']):
-     run(db,"UPDATE file_operations SET state='cancelled',error=%s,completed_at=UTC_TIMESTAMP(6) WHERE id=%s",('Superseded by a later move; verified original retained at '+current['relative_path'],op['id']));continue
-  source_found=recovery_file(db,op['source_file_id'],op['source_path'],op['source_sha256'])
-  target_found=recovery_file(db,op['target_file_id'],op['target_path'],op['target_sha256'])
-  if not target_found:
-   if not source_found:raise RuntimeError('Both paths absent for file operation '+str(op['id']))
-   f,source=source_found
-   with protected(source) as original:
-    if hashstream(original)!=bytes(op['source_sha256']):raise RuntimeError('Recovery original changed')
-    # An unstarted plan must not keep blocking after organization moves its original.
-    note='Obsolete plan cancelled; verified original retained at '+f['relative_path']
-    if op['operation_kind']=='deduplicate' and bytes(op['source_sha256'])==bytes(op['target_sha256']):
-     rejected=q(db,"SELECT id FROM duplicate_matches WHERE file_id_low=%s AND file_id_high=%s AND review_state='rejected'",(min(op['source_file_id'],op['target_file_id']),max(op['source_file_id'],op['target_file_id'])))
-     missing=q(db,'SELECT * FROM files WHERE id=%s',(op['target_file_id'],))[0]
-     if not rejected and missing['id']!=f['id']:
-      keeper=dict(f,file_sha256=bytes(op['source_sha256']))
-      rewrite_path(db,missing,keeper,source_stream=original,target_stream=original)
-      run(db,'UPDATE files SET canonical_file_id=NULL,is_present=TRUE WHERE id=%s',(f['id'],))
-      run(db,'UPDATE files SET canonical_file_id=%s WHERE canonical_file_id=%s',(f['id'],missing['id']))
-      run(db,'UPDATE files SET canonical_file_id=%s,is_present=FALSE WHERE id=%s',(f['id'],missing['id']))
-      note+='; missing identical target references linked to surviving original'
-   run(db,"UPDATE file_operations SET state='cancelled',error=%s,completed_at=UTC_TIMESTAMP(6) WHERE id=%s",(note,op['id']));continue
-  keeper,target=target_found;keeper=dict(keeper,file_sha256=bytes(op['target_sha256']))
-  # A completed deduplication may have retired the old path; its file ID still exists.
-  source_row=q(db,'SELECT * FROM files WHERE id=%s',(op['source_file_id'],))[0]
-  source=source_found[1] if source_found else None
-  if source==target:
-   state_name='complete' if keeper['relative_path']==op['target_path'] else 'cancelled'
-   run(db,"UPDATE file_operations SET state=%s,error=%s,completed_at=UTC_TIMESTAMP(6) WHERE id=%s",(state_name,'Verified file is already at its current location; no file deleted',op['id']));continue
-  def link(source_stream=None,target_stream=None):
-   f=dict(source_row,relative_path=source.relative_to(ROOT).as_posix() if source else op['source_path'])
-   rewrite_path(db,f,keeper,source_stream=source_stream,target_stream=target_stream)
-   if op['operation_kind']=='organize':run(db,'UPDATE files SET relative_path=%s,path_key=%s WHERE id=%s',(keeper['relative_path'],pathkey(keeper['relative_path']),f['id']))
-   else:
-    run(db,'UPDATE files SET canonical_file_id=%s WHERE canonical_file_id=%s',(keeper['id'],f['id']))
-    run(db,'UPDATE files SET canonical_file_id=%s,is_present=FALSE WHERE id=%s',(keeper['id'],f['id']))
-   run(db,"UPDATE file_operations SET state='linked' WHERE id=%s",(op['id'],))
-  with protected(target) as kept:
-   if hashstream(kept)!=bytes(op['target_sha256']):raise RuntimeError('Recovery target changed')
-   if source:
-    with protected(source,True) as original:
+  if op['state']=='error' and (op['error'] or '').startswith('On hold: '):continue
+  try:
+   if q(db,'SELECT move_id FROM fm_collection_move_files WHERE operation_id=%s LIMIT 1',(op['id'],)):continue
+   if not FMW.can_manage(db,op['source_path'])[0]:continue
+   if not FMW.can_relocate(db,op['source_file_id'],op['target_path'])[0]:continue
+   if op['operation_kind']=='organize':
+    current=q(db,'SELECT f.*,c.collection_key AS owner FROM fm_file_catalog f JOIN collections c ON c.id=f.collection_id WHERE f.id=%s',(op['source_file_id'],))[0]
+    if current['relative_path'] not in [op['source_path'],op['target_path']]:
+     current_path=safe(current['relative_path'])
+     if current_path.exists() and filehash(current_path)==bytes(op['source_sha256']):
+      run(db,"UPDATE file_operations SET state='cancelled',error=%s,completed_at=UTC_TIMESTAMP(6) WHERE id=%s",('Superseded by a later move; verified original retained at '+current['relative_path'],op['id']));continue
+   source_found=recovery_file(db,op['source_file_id'],op['source_path'],op['source_sha256'])
+   target_found=recovery_file(db,op['target_file_id'],op['target_path'],op['target_sha256'])
+   if not target_found:
+    if not source_found:raise RuntimeError('Both paths absent for file operation '+str(op['id']))
+    f,source=source_found
+    with protected(source) as original:
      if hashstream(original)!=bytes(op['source_sha256']):raise RuntimeError('Recovery original changed')
-     if op['operation_kind']=='deduplicate':
-      backup=backup_folder(op['id'],source.stat().st_size);saved=backup/source.name
-      if not saved.exists():
-       with saved.open('xb') as dest:shutil.copyfileobj(original,dest)
-       original.seek(0)
-      if filehash(saved)!=bytes(op['source_sha256']):raise RuntimeError('Recovery backup does not match original')
-     try:link(original,kept)
+     # An unstarted plan must not keep blocking after organization moves its original.
+     note='Obsolete plan cancelled; verified original retained at '+f['relative_path']
+     if op['operation_kind']=='deduplicate' and bytes(op['source_sha256'])==bytes(op['target_sha256']):
+      rejected=q(db,"SELECT id FROM duplicate_matches WHERE file_id_low=%s AND file_id_high=%s AND review_state='rejected'",(min(op['source_file_id'],op['target_file_id']),max(op['source_file_id'],op['target_file_id'])))
+      missing=q(db,'SELECT * FROM files WHERE id=%s',(op['target_file_id'],))[0]
+      if not rejected and missing['id']!=f['id']:
+       keeper=dict(f,file_sha256=bytes(op['source_sha256']))
+       rewrite_path(db,missing,keeper,source_stream=original,target_stream=original)
+       run(db,'UPDATE files SET canonical_file_id=NULL,is_present=TRUE WHERE id=%s',(f['id'],))
+       run(db,'UPDATE files SET canonical_file_id=%s WHERE canonical_file_id=%s',(f['id'],missing['id']))
+       run(db,'UPDATE files SET canonical_file_id=%s,is_present=FALSE WHERE id=%s',(f['id'],missing['id']))
+       note+='; missing identical target references linked to surviving original'
+    run(db,"UPDATE file_operations SET state='cancelled',error=%s,completed_at=UTC_TIMESTAMP(6) WHERE id=%s",(note,op['id']));continue
+   keeper,target=target_found;keeper=dict(keeper,file_sha256=bytes(op['target_sha256']))
+   # A completed deduplication may have retired the old path; its file ID still exists.
+   source_row=q(db,'SELECT * FROM files WHERE id=%s',(op['source_file_id'],))[0]
+   source=source_found[1] if source_found else None
+   if source==target:
+    state_name='complete' if keeper['relative_path']==op['target_path'] else 'cancelled'
+    run(db,"UPDATE file_operations SET state=%s,error=%s,completed_at=UTC_TIMESTAMP(6) WHERE id=%s",(state_name,'Verified file is already at its current location; no file deleted',op['id']));continue
+   def link(source_stream=None,target_stream=None):
+    f=dict(source_row,relative_path=source.relative_to(ROOT).as_posix() if source else op['source_path'])
+    rewrite_path(db,f,keeper,source_stream=source_stream,target_stream=target_stream)
+    if op['operation_kind']=='organize':run(db,'UPDATE files SET relative_path=%s,path_key=%s WHERE id=%s',(keeper['relative_path'],pathkey(keeper['relative_path']),f['id']))
+    else:
+     run(db,'UPDATE files SET canonical_file_id=%s WHERE canonical_file_id=%s',(keeper['id'],f['id']))
+     run(db,'UPDATE files SET canonical_file_id=%s,is_present=FALSE WHERE id=%s',(keeper['id'],f['id']))
+    run(db,"UPDATE file_operations SET state='linked' WHERE id=%s",(op['id'],))
+   with protected(target) as kept:
+    if hashstream(kept)!=bytes(op['target_sha256']):raise RuntimeError('Recovery target changed')
+    if source:
+     with protected(source,True) as original:
+      if hashstream(original)!=bytes(op['source_sha256']):raise RuntimeError('Recovery original changed')
+      if op['operation_kind']=='deduplicate':
+       backup=backup_folder(op['id'],source.stat().st_size);saved=backup/source.name
+       if not saved.exists():
+        with saved.open('xb') as dest:shutil.copyfileobj(original,dest)
+        original.seek(0)
+       if filehash(saved)!=bytes(op['source_sha256']):raise RuntimeError('Recovery backup does not match original')
+      try:link(original,kept)
+      except RuntimeError as error:
+       if 'Downloader MD5 differs from the actual file' not in str(error):raise
+       run(db,"UPDATE file_operations SET state='error',error=%s WHERE id=%s",(str(error),op['id']))
+       if op['error']!=str(error):review+=1
+       if len(review_issues)<10:review_issues.append({'file':op['source_path'],'error':str(error)})
+       continue
+      delete_protected(original)
+    else:
+     if bytes(op['source_sha256'])!=bytes(op['target_sha256']):
+      # A prior pass may already have linked the source and removed its old path.
+      # Verify the retained bytes above and all current pointers before closing it.
+      linked=source_row['canonical_file_id']==keeper['id'] and not source_row['is_present'] and source_row['relative_path']==''
+      linked=linked and not q(db,'SELECT id FROM inventory_entries WHERE file_id=%s LIMIT 1',(source_row['id'],)) and not q(db,'SELECT file_id FROM fm_external_bindings WHERE file_id=%s LIMIT 1',(source_row['id'],))
+      old_path=op['source_path']
+      integration='booru' if old_path.startswith('booru/') else 'wallpaper-download' if old_path.startswith('wallpaper-download/') else None
+      if linked and integration:
+       import DownloaderLocations as D
+       configs=q(db,"SELECT * FROM fm_adapter_config WHERE integration_key=%s AND enabled=TRUE AND adapter_kind IN ('booru-locations','wallpaper-current')",(integration,))
+       linked=bool(configs) and not D.lookup(db,configs[0],path=D.relative(configs[0],old_path))
+      if linked:
+       run(db,"UPDATE file_operations SET state='complete',source_path='',target_path='',error=NULL,completed_at=UTC_TIMESTAMP(6) WHERE id=%s",(op['id'],))
+       if op['error']=='Missing source has different bytes; recovery needs review':
+        review=max(0,review-1);review_issues=[issue for issue in review_issues if issue['file']!=old_path]
+       continue
+      run(db,"UPDATE file_operations SET state='error',error='Missing source has different bytes; recovery needs review' WHERE id=%s",(op['id'],))
+      if op['error']!='Missing source has different bytes; recovery needs review':review+=1
+      if len(review_issues)<10 and not any(issue['file']==op['source_path'] for issue in review_issues):review_issues.append({'file':op['source_path'],'error':'Operation '+str(op['id'])+' needs review: source missing and retained file has different bytes'})
+      continue
+     try:link(source_stream=kept,target_stream=kept)
      except RuntimeError as error:
       if 'Downloader MD5 differs from the actual file' not in str(error):raise
       run(db,"UPDATE file_operations SET state='error',error=%s WHERE id=%s",(str(error),op['id']))
       if op['error']!=str(error):review+=1
       if len(review_issues)<10:review_issues.append({'file':op['source_path'],'error':str(error)})
       continue
-     delete_protected(original)
-   else:
-    if bytes(op['source_sha256'])!=bytes(op['target_sha256']):
-     # A prior pass may already have linked the source and removed its old path.
-     # Verify the retained bytes above and all current pointers before closing it.
-     linked=source_row['canonical_file_id']==keeper['id'] and not source_row['is_present'] and source_row['relative_path']==''
-     linked=linked and not q(db,'SELECT id FROM inventory_entries WHERE file_id=%s LIMIT 1',(source_row['id'],)) and not q(db,'SELECT file_id FROM fm_external_bindings WHERE file_id=%s LIMIT 1',(source_row['id'],))
-     old_path=op['source_path']
-     integration='booru' if old_path.startswith('booru/') else 'wallpaper-download' if old_path.startswith('wallpaper-download/') else None
-     if linked and integration:
-      import DownloaderLocations as D
-      configs=q(db,"SELECT * FROM fm_adapter_config WHERE integration_key=%s AND enabled=TRUE AND adapter_kind IN ('booru-locations','wallpaper-current')",(integration,))
-      linked=bool(configs) and not D.lookup(db,configs[0],path=D.relative(configs[0],old_path))
-     if linked:
-      run(db,"UPDATE file_operations SET state='complete',source_path='',target_path='',error=NULL,completed_at=UTC_TIMESTAMP(6) WHERE id=%s",(op['id'],))
-      if op['error']=='Missing source has different bytes; recovery needs review':
-       review=max(0,review-1);review_issues=[issue for issue in review_issues if issue['file']!=old_path]
-      continue
-     run(db,"UPDATE file_operations SET state='error',error='Missing source has different bytes; recovery needs review' WHERE id=%s",(op['id'],))
-     if op['error']!='Missing source has different bytes; recovery needs review':review+=1
-     if len(review_issues)<10 and not any(issue['file']==op['source_path'] for issue in review_issues):review_issues.append({'file':op['source_path'],'error':'Operation '+str(op['id'])+' needs review: source missing and retained file has different bytes'})
-     continue
-    try:link(source_stream=kept,target_stream=kept)
-    except RuntimeError as error:
-     if 'Downloader MD5 differs from the actual file' not in str(error):raise
-     run(db,"UPDATE file_operations SET state='error',error=%s WHERE id=%s",(str(error),op['id']))
-     if op['error']!=str(error):review+=1
-     if len(review_issues)<10:review_issues.append({'file':op['source_path'],'error':str(error)})
-     continue
-  run(db,"UPDATE file_operations SET state='complete',error=NULL,completed_at=UTC_TIMESTAMP(6) WHERE id=%s",(op['id'],))
+   run(db,"UPDATE file_operations SET state='complete',error=NULL,completed_at=UTC_TIMESTAMP(6) WHERE id=%s",(op['id'],))
+  except Exception as error:
+   db.rollback()
+   message=str(error)
+   run(db,"UPDATE file_operations SET state='error',error=%s WHERE id=%s",(message,op['id']))
+   print('Recovery operation '+str(op['id'])+': '+traceback.format_exc(),flush=True)
+   if op['error']!=message:review+=1
+   if len(review_issues)<10:review_issues.append({'file':op['source_path'],'error':'Operation '+str(op['id'])+': '+message})
  if total:progress(db,'File recovery pass complete',total,total,recovery_processed=total,recovery_total=total,recovery_review=review,issues=review_issues)
 
 def cycle(db):
