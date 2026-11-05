@@ -24,6 +24,7 @@ public static class GalleryAuth {
  public static bool Enabled {get{return ConfigurationManager.AppSettings["GalleryAuthEnabled"]=="true";}}
  static Dictionary<string,object> Config {get{lock(ConfigLock){if(config==null)config=Gallery.Json.Deserialize<Dictionary<string,object>>(File.ReadAllText(ConfigurationManager.AppSettings["GalleryAuthConfig"]));return config;}}}
  static string Setting(string key){return Gallery.Text(Config,key);}
+ public static string ExternalClientId {get{return Setting("externalClientId");}}
  public static string PublicUrl {get{return Enabled?Setting("publicUrl").TrimEnd('/'):"";}}
  static long UnixNow {get{return DateTimeOffset.UtcNow.ToUnixTimeSeconds();}}
  static string Random(){byte[] b=new byte[32];using(var rng=RandomNumberGenerator.Create())rng.GetBytes(b);return Base64UrlEncoder.Encode(b);}
@@ -33,6 +34,18 @@ public static class GalleryAuth {
  static Dictionary<string,object> ReadCookie(HttpContext c,string name){try{var cookie=c.Request.Cookies[name];if(cookie==null||cookie.Value.Length>16000)return null;byte[] data=MachineKey.Unprotect(Base64UrlEncoder.DecodeBytes(cookie.Value),"WallpaperGallery",name);var value=Gallery.Json.Deserialize<Dictionary<string,object>>(System.Text.Encoding.UTF8.GetString(data));if(Convert.ToInt64(value["expires"])<=UnixNow)return null;return value;}catch{return null;}}
  static void Expire(HttpContext c,string name){c.Response.Cookies.Set(Cookie(name,"",DateTime.UtcNow.AddDays(-1)));}
  static OpenIdConnectConfiguration Metadata(bool refresh=false){lock(ConfigLock){if(discovery==null)discovery=new Microsoft.IdentityModel.Protocols.ConfigurationManager<OpenIdConnectConfiguration>(Setting("authority").TrimEnd('/')+"/.well-known/openid-configuration",new OpenIdConnectConfigurationRetriever(),new HttpDocumentRetriever(){RequireHttps=true});if(refresh)discovery.RequestRefresh();}return discovery.GetConfigurationAsync(CancellationToken.None).GetAwaiter().GetResult();}
+ public static ClaimsPrincipal ValidateExternalIdToken(string token){
+  string audience=ExternalClientId;if(String.IsNullOrWhiteSpace(audience))throw new GalleryError(503,"External media integration is not configured.");
+  var md=Metadata();var handler=new JwtSecurityTokenHandler(){MapInboundClaims=false};SecurityToken validated;ClaimsPrincipal principal=null;
+  for(int attempt=0;attempt<2;attempt++)try{principal=handler.ValidateToken(token,new TokenValidationParameters{ValidateIssuerSigningKey=true,IssuerSigningKeys=md.SigningKeys,ValidateIssuer=true,ValidIssuer=Setting("authority").TrimEnd('/')+"/",ValidateAudience=true,ValidAudience=audience,RequireSignedTokens=true,RequireExpirationTime=true,ValidateLifetime=true,ClockSkew=TimeSpan.FromSeconds(60),ValidAlgorithms=new[]{SecurityAlgorithms.RsaSha256}},out validated);break;}catch(SecurityTokenSignatureKeyNotFoundException){if(attempt!=0)throw;md=Metadata(true);}
+  var subject=principal==null?null:principal.FindFirst("sub");if(subject==null||String.IsNullOrWhiteSpace(subject.Value))throw new GalleryError(401,"The identity token is invalid.");
+  var jwt=handler.ReadJwtToken(token);var azp=principal.FindFirst("azp");if((jwt.Audiences.Count()>1&&azp==null)||(azp!=null&&azp.Value!=audience))throw new GalleryError(401,"The identity token was issued for another application.");
+  return principal;
+ }
+ public static Dictionary<string,object> RefreshExternalTokens(string refreshToken){
+  string clientId=ExternalClientId,clientSecret=Setting("externalClientSecret");if(String.IsNullOrWhiteSpace(clientId)||String.IsNullOrWhiteSpace(clientSecret))throw new GalleryError(503,"External media integration is not configured.");
+  var md=Metadata();using(var client=new HttpClient()){client.Timeout=TimeSpan.FromSeconds(15);var data=new Dictionary<string,string>{{"grant_type","refresh_token"},{"refresh_token",refreshToken},{"client_id",clientId},{"client_secret",clientSecret}};var response=client.PostAsync(md.TokenEndpoint,new FormUrlEncodedContent(data)).GetAwaiter().GetResult();if(!response.IsSuccessStatusCode)throw new GalleryError(401,"Gallery identity needs to be refreshed by the user.");return Gallery.Json.Deserialize<Dictionary<string,object>>(response.Content.ReadAsStringAsync().GetAwaiter().GetResult());}
+ }
  public static string Role(HttpContext c){return Convert.ToString(c.Items["GalleryRole"]??(Enabled?"":"admins"));}
  public static bool IsAdmin(HttpContext c){return Role(c)=="admins";}
  public static string[] Groups(HttpContext c){return c.Items["GalleryGroups"] as string[]??new string[0];}
@@ -45,6 +58,8 @@ public static class GalleryAuth {
  public static void Authorize(HttpContext c){
   if(!Enabled)return;
   string path=c.Request.Path.ToLowerInvariant();
+  // The external API uses validated bearer identity or grant credentials and never browser cookies.
+  if(path.StartsWith("/api/external/"))return;
   // Only the local queue guardian may poll its dedicated endpoint without a browser session.
   IPAddress address;bool loopback=IPAddress.TryParse(c.Request.UserHostAddress,out address)&&IPAddress.IsLoopback(address);
   if(loopback&&c.Request.HttpMethod=="GET"&&path=="/api/downloads"&&Setting("workerKey").Length>=32&&Equal(c.Request.Headers["X-Gallery-Worker"],Setting("workerKey"))){c.Items["GalleryRole"]="worker";return;}

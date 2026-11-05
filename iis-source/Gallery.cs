@@ -21,6 +21,7 @@ public class GalleryHandler : IHttpHandler {
         c.Response.Headers["X-Content-Type-Options"]="nosniff";
         try {
             string route=c.Request.Path.TrimEnd('/').Split('/').Last().ToLowerInvariant();
+            if(c.Request.Path.StartsWith("/api/external/",StringComparison.OrdinalIgnoreCase)){Gallery.ProcessExternal(c);return;}
             if(GalleryAuth.Enabled){
                 string role=GalleryAuth.Role(c);
                 if(role==""){Reply(c,401,new{error="Sign in to the gallery."});return;}
