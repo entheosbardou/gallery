@@ -1,6 +1,13 @@
 # Project status
 
-Snapshot: November 4, 2026. This records the evidence available when the repository was prepared; it is not a live status monitor.
+The original repository snapshot and later timestamped entries record evidence available at their respective observation times. This is not a live status monitor.
+
+## 2026-11-04 23:20 MST — External media connection active
+
+- Gallery source for the external API and rotated refresh-token response is in this repository, including pushed commit `905fd04`. The release built from this repository was copied from `BENS-LAPTOP` to `bens-pc`. Elevated `Deploy-OnHost.ps1 -ValidateOnly` passed there, then deployment completed with backup `C:\downloads\gallery\change-backups\github-release-20261104-224844`. The live DLL hash matched the repository release; the IIS app pool was Started and the worker task Running at the bounded check.
+- The host-only live `C:\downloads\gallery\iis-data\oidc.json` on `bens-pc` was backed up as `oidc.json.pre-external-20261104-231234.bak`, then configured with external client settings matching its existing OIDC provider. This was a configuration change, not a source change; credentials remain outside the repository. The app pool was restarted to load the settings.
+- The shared Authentik provider now enables the Refresh token grant and `offline_access` scope mapping; its Gallery roles mapping remains selected. A signed ID-token catalog request from the Open Wallpaper container returned HTTP 200 with an item in the requested page. The user subsequently confirmed Gallery media is visible in Open Wallpaper.
+- Device-grant creation, item revocation, outage behavior, and Android playback have not been verified end to end in this status update. The additive Gallery grant tables were previously applied to the live database without a database backup at the user's direction. `current-changes.md` is reset for the next session and remains untracked.
 
 ## 2026-11-04 20:08 MDT — External media API source work
 
