@@ -1,3 +1,3 @@
 # Current changes — Gallery
 
-Temporary working context for the active development session in this repository only. Record repository-owned work here as it arises; keep durable status in `PROJECT_STATUS.md`.
+- The external API now supplies accessible collection keys and filters media pages by collection for Open Wallpaper. The matching Open Wallpaper source must be deployed with this API.

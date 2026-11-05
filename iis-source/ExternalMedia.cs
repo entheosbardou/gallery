@@ -32,9 +32,9 @@ public static partial class Gallery {
  static string ExternalMime(string path){switch(Path.GetExtension(path).ToLowerInvariant()){case ".jpg":case ".jpeg":return "image/jpeg";case ".png":return "image/png";case ".gif":return "image/gif";case ".webp":return "image/webp";case ".avif":return "image/avif";case ".bmp":return "image/bmp";case ".tif":case ".tiff":return "image/tiff";default:return "application/octet-stream";}}
  static object ExternalCatalog(HttpContext c){
   var principal=ExternalPrincipal(c);var groups=ExternalGroups(principal);var rights=Gallery.GrantForGroups(groups);if(!rights.allowed)throw new GalleryError(403,"This identity has no Gallery media access.");
-  long after=0;int limit=100;if(!String.IsNullOrEmpty(c.Request.QueryString["after"])&&!Int64.TryParse(c.Request.QueryString["after"],out after))throw new GalleryError(400,"Invalid catalog cursor.");if(!String.IsNullOrEmpty(c.Request.QueryString["limit"])&&!Int32.TryParse(c.Request.QueryString["limit"],out limit))throw new GalleryError(400,"Invalid page size.");limit=Math.Max(1,Math.Min(250,limit));
+  long after=0;int limit=100;string selectedCollection=c.Request.QueryString["collection"];if(!String.IsNullOrEmpty(c.Request.QueryString["after"])&&!Int64.TryParse(c.Request.QueryString["after"],out after))throw new GalleryError(400,"Invalid catalog cursor.");if(!String.IsNullOrEmpty(c.Request.QueryString["limit"])&&!Int32.TryParse(c.Request.QueryString["limit"],out limit))throw new GalleryError(400,"Invalid page size.");limit=Math.Max(1,Math.Min(250,limit));
   using(var db=OpenDatabase()){
-   var policy=Gallery.GetAccessPolicy();var collections=DBRows(db,null,"SELECT c.id,c.collection_key FROM collections c JOIN fm_collection_discovery d ON d.collection_id=c.id AND d.is_marked=TRUE ORDER BY c.id").Where(x=>Gallery.CollectionAccessAllowed(groups,Text(x,"collection_key"),policy)).ToList();if(collections.Count==0)return new{items=new object[0],next_after=(long?)null};
+   var policy=Gallery.GetAccessPolicy();var collections=DBRows(db,null,"SELECT c.id,c.collection_key FROM collections c JOIN fm_collection_discovery d ON d.collection_id=c.id AND d.is_marked=TRUE ORDER BY c.id").Where(x=>Gallery.CollectionAccessAllowed(groups,Text(x,"collection_key"),policy)).Where(x=>selectedCollection==null||Text(x,"collection_key")==selectedCollection).ToList();if(collections.Count==0)return new{items=new object[0],next_after=(long?)null};
    var args=new List<object>();var ownerParams=collections.Select((x,i)=>"@c"+i).ToArray();for(int i=0;i<collections.Count;i++){args.Add(ownerParams[i]);args.Add(collections[i]["id"]);}
    var cats=rights.categories;string catSql=cats.Length==0?"NULL":String.Join(",",cats.Select((x,i)=>"@k"+i));for(int i=0;i<cats.Length;i++){args.Add("@k"+i);args.Add(cats[i]);}
    args.Add("@after");args.Add(after);args.Add("@take");args.Add(limit+1);
@@ -43,6 +43,10 @@ public static partial class Gallery {
    var items=rows.Select(f=>new{file_id=f["file_id"],relative_path=f["relative_path"],name=Path.GetFileName(Text(f,"relative_path")),mime=ExternalMime(Text(f,"relative_path")),byte_size=f["byte_size"],width=f["width"],height=f["height"],category=f["category"],collection=f["collection"]}).ToArray();
    return new{items=items,next_after=more&&rows.Count>0?(long?)Convert.ToInt64(rows.Last()["file_id"]):null};
   }
+ }
+ static object ExternalCollections(HttpContext c){
+  var principal=ExternalPrincipal(c);var groups=ExternalGroups(principal);if(!Gallery.GrantForGroups(groups).allowed)throw new GalleryError(403,"This identity has no Gallery media access.");
+  using(var db=OpenDatabase()){var policy=Gallery.GetAccessPolicy();var items=DBRows(db,null,"SELECT c.collection_key FROM collections c JOIN fm_collection_discovery d ON d.collection_id=c.id AND d.is_marked=TRUE ORDER BY c.collection_key").Where(x=>Gallery.CollectionAccessAllowed(groups,Text(x,"collection_key"),policy)).Select(x=>Text(x,"collection_key")).ToArray();return new{collections=items};}
  }
  static object ExternalCreateGrant(HttpContext c,Dictionary<string,object> body){
   var principal=ExternalPrincipal(c);var groups=ExternalGroups(principal);var files=ExternalIds(body);string refresh=ExternalText(body,"refresh_token"),device=ExternalText(body,"device_id"),instance=ExternalText(body,"client_instance");if(String.IsNullOrEmpty(refresh)||refresh.Length>8192||String.IsNullOrWhiteSpace(device)||device.Length>128||String.IsNullOrWhiteSpace(instance)||instance.Length>128)throw new GalleryError(400,"A refresh token, client instance, and device ID are required.");
@@ -77,6 +81,7 @@ public static partial class Gallery {
   try{
    string path=c.Request.Path.TrimEnd('/').ToLowerInvariant();object result;
    if(path=="/api/external/media"&&c.Request.HttpMethod=="GET")result=ExternalCatalog(c);
+   else if(path=="/api/external/collections"&&c.Request.HttpMethod=="GET")result=ExternalCollections(c);
    else if(path=="/api/external/grants"&&c.Request.HttpMethod=="POST")result=ExternalCreateGrant(c,ReadExternalBody(c));
    else if(path=="/api/external/grants/authorize"&&c.Request.HttpMethod=="POST")result=ExternalAuthorizeGrant(c,ReadExternalBody(c));
    else if(path=="/api/external/grants/revoke"&&c.Request.HttpMethod=="POST")result=ExternalRevokeGrant(c,ReadExternalBody(c));

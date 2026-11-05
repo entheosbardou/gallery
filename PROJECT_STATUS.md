@@ -1,3 +1,7 @@
+## 2026-11-05 — External collection API in source
+
+- Added an authenticated external endpoint that lists accessible collection keys and an optional exact collection filter for the paged external media catalog. Open Wallpaper uses both for collection-first browsing. This source change was not deployed.
+
 # Project status
 
 The original repository snapshot and later timestamped entries record evidence available at their respective observation times. This is not a live status monitor.
