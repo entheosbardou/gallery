@@ -1,3 +1,7 @@
+## 2026-11-05 — External collection categories in source
+
+- The collection endpoint now returns accessible categories beside collection keys, without media items. The media endpoint accepts an optional exact category filter in addition to its collection filter. The release built locally; this change has not been deployed or verified with an authenticated live request.
+
 ## 2026-11-05 09:19 -07:00 — External collection API deployed
 
 - Built the collection API source and deployed its release to the live Gallery IIS installation on bens-pc. Preflight passed. Deployment backup: `C:\downloads\gallery\change-backups\github-release-20261105-091731`.
