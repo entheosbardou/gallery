@@ -54,7 +54,8 @@ public static partial class Gallery {
    DBExec(db,tx,"INSERT INTO external_device_grants(grant_id_hash,client_instance_id,device_id,oidc_issuer,oidc_sub,refresh_token_encrypted,state,expires_at) VALUES(@hash,@client,@device,@issuer,@sub,@refresh,'active',FROM_UNIXTIME(@expires))","@hash",hash,"@client",instance,"@device",device,"@issuer",ExternalIssuer(fresh),"@sub",ExternalSubject(fresh),"@refresh",encrypted,"@expires",expires);
    foreach(long id in allowed)DBExec(db,tx,"INSERT INTO external_device_grant_items(grant_id_hash,file_id) VALUES(@hash,@file)","@hash",hash,"@file",id);tx.Commit();
   }
-  return new{grant_token=grant,device_id=device,client_instance=instance,authorized_file_ids=allowed,denied_file_ids=denied,expires_at=expires};
+  // This endpoint is called by the trusted Open Wallpaper server, which also retains the user's OIDC refresh token for later Gallery catalog browsing. Return the rotated value so the caller can replace its prior copy.
+  return new{grant_token=grant,device_id=device,client_instance=instance,authorized_file_ids=allowed,denied_file_ids=denied,expires_at=expires,refresh_token=latestRefresh};
  }
  static object ExternalAuthorizeGrant(HttpContext c,Dictionary<string,object> body){
   string grant=c.Request.Headers["X-Gallery-Device-Grant"]??"",device=ExternalText(body,"device_id"),instance=ExternalText(body,"client_instance");if(grant.Length<32||grant.Length>256||device.Length==0||device.Length>128||instance.Length==0||instance.Length>128)throw new GalleryError(401,"A valid Gallery device grant is required.");var ids=ExternalIds(body);byte[] hash=ExternalDigest(grant);Dictionary<string,object> record;

@@ -36,6 +36,9 @@ jobs:
         with:
           name: gallery-release
           path: .docker-stage/release
+      - name: Validate the live Gallery deployment target
+        shell: powershell
+        run: ./deploy/Deploy-OnHost.ps1 -ReleasePath .docker-stage/release -ValidateOnly
       - name: Deploy to the existing IIS site
         shell: powershell
         run: ./deploy/Deploy-OnHost.ps1 -ReleasePath .docker-stage/release
