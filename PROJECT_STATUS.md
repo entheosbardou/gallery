@@ -1,6 +1,7 @@
-## 2026-11-05 — External collection API in source
+## 2026-11-05 09:19 -07:00 — External collection API deployed
 
-- Added an authenticated external endpoint that lists accessible collection keys and an optional exact collection filter for the paged external media catalog. Open Wallpaper uses both for collection-first browsing. This source change was not deployed.
+- Built the collection API source and deployed its release to the live Gallery IIS installation on bens-pc. Preflight passed. Deployment backup: `C:\downloads\gallery\change-backups\github-release-20261105-091731`.
+- The live DLL SHA256 matches the built release (`9AAB04EFEA23E64CEED8E3A080458DE935EA5AAA7B8788B7D5ABE537D6652639`). The IIS site and app pool were Started and the worker task Running immediately afterward. Anonymous requests to `/api/external/collections` and `/api/external/media` both returned HTTP 401. The user confirmed authenticated collection listing and filtering work as expected.
 
 # Project status
 
