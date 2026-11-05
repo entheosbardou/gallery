@@ -51,7 +51,8 @@ public class GalleryHandler : IHttpHandler {
             if(route=="downloads" && c.Request.HttpMethod=="GET") { Reply(c,200,Gallery.DownloadQueueStatus()); return; }
             if(route=="duplicates" && c.Request.HttpMethod=="GET") { Reply(c,200,Gallery.DuplicateStatus()); return; }
             if(route=="database-status" && c.Request.HttpMethod=="GET") { Reply(c,200,Gallery.DatabaseWorkerStatus()); return; }
-            if(route=="recovery-operations" && c.Request.HttpMethod=="GET") { if(!GalleryAuth.IsAdmin(c))throw new GalleryError(403,"Only gallery administrators can review file operations.");Reply(c,200,Gallery.DatabaseRecoveryOperations());return; }
+            if(route=="recovery-action-status" && c.Request.HttpMethod=="GET") { if(!GalleryAuth.IsAdmin(c))throw new GalleryError(403,"Only administrators can review recovery decisions.");Reply(c,200,Gallery.DatabaseRecoveryActionStatus(c.Request.QueryString["ids"]??""));return; }
+            if(route=="recovery-operations" && c.Request.HttpMethod=="GET") { if(!GalleryAuth.IsAdmin(c))throw new GalleryError(403,"Only gallery administrators can review file operations.");Reply(c,200,Gallery.DatabaseRecoveryOperations(c.Request.QueryString["id"]??"") );return; }
             if(route=="retry-recovery-operation" && c.Request.HttpMethod=="POST") { if(!GalleryAuth.IsAdmin(c))throw new GalleryError(403,"Only gallery administrators can retry file operations.");Reply(c,202,Gallery.RequestDatabaseWorker());return; }
             if(route=="clear-scan-issues" && c.Request.HttpMethod=="POST") { Reply(c,200,Gallery.ClearDatabaseIssues()); return; }
             if(route=="retry-scan-issues" && c.Request.HttpMethod=="POST") { Reply(c,202,Gallery.RetryDatabaseIssues()); return; }
@@ -62,6 +63,8 @@ public class GalleryHandler : IHttpHandler {
             var payload=Gallery.Json.Deserialize<Dictionary<string,object>>(new StreamReader(c.Request.InputStream).ReadToEnd());
             if(payload==null) throw new GalleryError(400,"Invalid request.");
             if(route=="access-settings") { Reply(c,200,Gallery.SaveAccessPolicy(c,payload));return; }
+            if(route=="recovery-action") { if(!GalleryAuth.IsAdmin(c))throw new GalleryError(403,"Only administrators can resolve recovery issues.");Reply(c,202,Gallery.DatabaseRecoveryAction(payload));return; }
+            if(route=="resolve-superseded-recovery") { if(!GalleryAuth.IsAdmin(c))throw new GalleryError(403,"Only gallery administrators can resolve file operations.");Reply(c,200,Gallery.DatabaseResolveSupersededRecoveryOperation(payload));return; }
             if(route=="hold-recovery-operation") { if(!GalleryAuth.IsAdmin(c))throw new GalleryError(403,"Only gallery administrators can hold file operations.");Reply(c,200,Gallery.DatabaseHoldRecoveryOperation(payload));return; }
             if(route=="keep-both-recovery") { if(!GalleryAuth.IsAdmin(c))throw new GalleryError(403,"Only gallery administrators can resolve file operations.");Reply(c,200,Gallery.DatabaseKeepBothRecoveryOperation(payload));return; }
             if(route=="export-inventory") { Reply(c,200,Gallery.ExportDatabaseInventory(Gallery.Text(payload,"collection")));return; }

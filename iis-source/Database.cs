@@ -92,11 +92,45 @@ public static partial class Gallery {
  public static void RequestDatabaseImportUpdates(){SetDatabaseState("import_updates",new{requested=true});}
  public static object RequestDatabaseWorker(){SetDatabaseState("worker_requested",new{requested=true});var current=DatabaseState("worker_status") as Dictionary<string,object>;if(current!=null&&Text(current,"phase")=="scanning")return current;var result=new{phase="scanning",message="Background database processing requested."};SetDatabaseState("worker_status",result);return result;}
  public static object DatabaseWorkerStatus(){return DatabaseState("worker_status")??new{phase="idle"};}
- public static object DatabaseRecoveryOperations(){using(var db=OpenDatabase()){
+ public static object DatabaseRecoveryOperations(string requestedId){long id=0;if(requestedId!=""&&(!Int64.TryParse(requestedId,out id)||id<1))throw new GalleryError(400,"Enter a valid operation ID.");using(var db=OpenDatabase()){
   var total=Convert.ToInt64(DBRows(db,null,"SELECT COUNT(*) n FROM file_operations WHERE state='error'")[0]["n"]);
-  var items=DBRows(db,null,"SELECT o.id,o.operation_kind,o.state,o.error,o.source_path,o.target_path,HEX(o.source_sha256) expected_source_sha256,HEX(o.target_sha256) expected_target_sha256,o.source_file_id,o.target_file_id,s.relative_path current_source_path,(SELECT c.collection_key FROM fm_file_catalog fc JOIN collections c ON c.id=fc.collection_id WHERE fc.id=o.source_file_id) source_collection,s.is_present source_catalog_present,s.canonical_file_id source_canonical_file_id,t.relative_path current_target_path,(SELECT c.collection_key FROM fm_file_catalog fc JOIN collections c ON c.id=fc.collection_id WHERE fc.id=o.target_file_id) target_collection,t.is_present target_catalog_present,(SELECT COUNT(*) FROM inventory_entries e WHERE e.file_id=o.source_file_id) source_entry_links,(SELECT COUNT(*) FROM fm_external_bindings b WHERE b.file_id=o.source_file_id) source_downloader_links FROM file_operations o LEFT JOIN files s ON s.id=o.source_file_id LEFT JOIN files t ON t.id=o.target_file_id WHERE o.state='error' ORDER BY CASE WHEN o.error IN ('Missing source has different bytes; recovery needs review','Downloader MD5 differs from the actual file; original retained') THEN 0 ELSE 1 END,o.id LIMIT 50");
+  var items=DBRows(db,null,"SELECT o.id,o.operation_kind,o.state,o.error,o.source_path,o.target_path,HEX(o.source_sha256) expected_source_sha256,HEX(o.target_sha256) expected_target_sha256,o.source_file_id,o.target_file_id,s.relative_path current_source_path,(SELECT c.collection_key FROM fm_file_catalog fc JOIN collections c ON c.id=fc.collection_id WHERE fc.id=o.source_file_id) source_collection,s.is_present source_catalog_present,s.canonical_file_id source_canonical_file_id,t.relative_path current_target_path,(SELECT c.collection_key FROM fm_file_catalog fc JOIN collections c ON c.id=fc.collection_id WHERE fc.id=o.target_file_id) target_collection,t.is_present target_catalog_present,t.canonical_file_id target_canonical_file_id,k.relative_path survivor_path,(SELECT c.collection_key FROM fm_file_catalog fc JOIN collections c ON c.id=fc.collection_id WHERE fc.id=k.id) survivor_collection,k.is_present survivor_catalog_present,(SELECT COUNT(*) FROM inventory_entries e WHERE e.file_id=o.source_file_id) source_entry_links,(SELECT COUNT(*) FROM fm_external_bindings b WHERE b.file_id=o.source_file_id) source_downloader_links FROM file_operations o LEFT JOIN files s ON s.id=o.source_file_id LEFT JOIN files t ON t.id=o.target_file_id LEFT JOIN files k ON k.id=s.canonical_file_id AND k.id=t.canonical_file_id WHERE o.state='error' AND (@id=0 OR o.id=@id) ORDER BY CASE WHEN o.error IN ('Missing source has different bytes; recovery needs review','Downloader MD5 differs from the actual file; original retained') THEN 0 ELSE 1 END,o.id LIMIT 50","@id",id);
   return new{total=total,items=items};
  }}
+ public static object DatabaseRecoveryAction(Dictionary<string,object> payload){
+  long id;if(!Int64.TryParse(Text(payload,"id"),out id)||id<1)throw new GalleryError(400,"Choose an issue.");
+  string choice=Text(payload,"choice");if(!new[]{"first","second","both","cancel_move","retry","restore","locate"}.Contains(choice))throw new GalleryError(400,"Choose a resolution.");
+  using(var db=OpenDatabase())using(var tx=db.BeginTransaction()){
+   var rows=DBRows(db,tx,"SELECT id,state,source_file_id,target_file_id,source_path,target_path FROM file_operations WHERE id=@id FOR UPDATE","@id",id);
+   if(rows.Count==0)throw new GalleryError(404,"Issue not found.");var op=rows[0];
+   if(new[]{"complete","cancelled"}.Contains(Text(op,"state")))return new{message="Already resolved. The old error has been cleared."};
+   if(Text(payload,"source_id")!=""&&(Text(payload,"source_id")!=Text(op,"source_file_id")||Text(payload,"target_id")!=Text(op,"target_file_id")))throw new GalleryError(409,"This cleanup changed since the page loaded. Refresh the issue list before choosing a copy.");
+   string key="recovery_action:"+id;
+   var old=DBRows(db,tx,"SELECT value FROM gallery_state WHERE state_key=@key FOR UPDATE","@key",key);
+   if(old.Count>0){var request=Json.Deserialize<Dictionary<string,object>>(Text(old[0],"value"));if(new[]{"pending","working"}.Contains(Text(request,"status")))throw new GalleryError(409,"Your previous choice is still being checked. Its result will appear here automatically.");}
+   var value=new{id=id,choice=choice,side=Text(payload,"side"),path=Text(payload,"path"),plan=op,status="pending",message="Waiting for the worker to verify files and apply your choice."};
+   DBExec(db,tx,"INSERT INTO gallery_state(state_key,value) VALUES(@key,@value) ON DUPLICATE KEY UPDATE value=VALUES(value)","@key",key,"@value",Json.Serialize(value));tx.Commit();return new{message=value.message};
+  }
+ }
+ public static object DatabaseRecoveryActionStatus(string requestedIds){
+  var ids=(requestedIds??"").Split(',');if(ids.Length<1||ids.Length>50)throw new GalleryError(400,"Choose up to 50 issues.");
+  var args=new List<object>();var names=new List<string>();foreach(string value in ids){long id;if(!Int64.TryParse(value,out id)||id<1)throw new GalleryError(400,"Choose valid issues.");string key="@id"+names.Count;names.Add(key);args.Add(key);args.Add(id);}
+  using(var db=OpenDatabase())return new{items=DBRows(db,null,"SELECT o.id,o.state,o.error,s.value action FROM file_operations o LEFT JOIN gallery_state s ON s.state_key=CONCAT('recovery_action:',o.id) WHERE o.id IN ("+String.Join(",",names)+")",args.ToArray())};
+ }
+ static string RecoveryReviewPath(string root,string relative){
+  if(String.IsNullOrWhiteSpace(relative)||Path.IsPathRooted(relative))throw new GalleryError(409,"A file has no usable location.");
+  root=Path.GetFullPath(root).TrimEnd('\\');
+  string path=Path.GetFullPath(Path.Combine(root,relative.Replace('/','\\')));
+  if(!Under(path,root))throw new GalleryError(409,"The file location is outside wallpaper storage.");
+  // Inspect existing ancestors as well as the leaf; missing old leaves are expected.
+  for(string current=path;;current=Path.GetDirectoryName(current)){
+   try{var attributes=File.GetAttributes(current);if((attributes&FileAttributes.ReparsePoint)!=0)throw new GalleryError(409,"A linked folder or file needs manual review.");}
+   catch(FileNotFoundException){if(current==root)throw new GalleryError(409,"Wallpaper storage is unavailable.");}
+   catch(DirectoryNotFoundException){if(current==root)throw new GalleryError(409,"Wallpaper storage is unavailable.");}
+   if(String.Equals(current,root,StringComparison.OrdinalIgnoreCase))break;
+  }
+  return path;
+ }
  public static object DatabaseKeepBothRecoveryOperation(Dictionary<string,object> payload){
   long id;if(!Int64.TryParse(Text(payload,"id"),out id)||id<1)throw new GalleryError(400,"Choose a file operation.");
   using(var db=OpenDatabase())using(var tx=db.BeginTransaction()){
@@ -105,12 +139,29 @@ public static partial class Gallery {
    if(Text(op,"state")!="error"||Text(op,"operation_kind")!="deduplicate"||Convert.ToInt64(op["source_file_id"])==Convert.ToInt64(op["target_file_id"])||Text(op,"source_canonical")!=""||Text(op,"target_canonical")!=""||!Convert.ToBoolean(op["source_present"])||!Convert.ToBoolean(op["target_present"])||Text(op,"current_source")!=Text(op,"source_path")||Text(op,"current_target")!=Text(op,"target_path"))throw new GalleryError(409,"This operation cannot safely keep both files. Retry or review its current links.");
    foreach(var side in new[]{"source","target"}){
     string relative=Text(op,side+"_path"),expected=Text(op,side+"_sha").ToLowerInvariant();
-    string path=Path.GetFullPath(Path.Combine(Root,relative.Replace('/','\\')));
-    if(!Under(path,Root)||Linked(path)||!File.Exists(path))throw new GalleryError(409,"A file is missing or outside wallpaper storage; no change made.");
+    string path=RecoveryReviewPath(Root,relative);
+    if(!File.Exists(path))throw new GalleryError(409,"A file is missing or outside wallpaper storage; no change made.");
     using(var stream=new FileStream(path,FileMode.Open,FileAccess.Read,FileShare.Read))if(HashStream(stream)!=expected)throw new GalleryError(409,"A file's bytes changed; no change made.");
    }
+   DBExec(db,tx,"UPDATE duplicate_matches SET review_state='rejected' WHERE file_id_low=LEAST(@source,@target) AND file_id_high=GREATEST(@source,@target)","@source",op["source_file_id"],"@target",op["target_file_id"]);
    DBExec(db,tx,"UPDATE file_operations SET state='cancelled',completed_at=UTC_TIMESTAMP(6) WHERE id=@id","@id",id);
    tx.Commit();return new{status="cancelled",message="Both verified files were kept. The pending deduplication was cancelled."};
+  }
+ }
+ public static object DatabaseResolveSupersededRecoveryOperation(Dictionary<string,object> payload){
+  long id;if(!Int64.TryParse(Text(payload,"id"),out id)||id<1)throw new GalleryError(400,"Choose a file operation.");
+  using(var db=OpenDatabase())using(var tx=db.BeginTransaction()){
+   var rows=DBRows(db,tx,"SELECT o.id,o.state,o.operation_kind,o.source_path,o.target_path,HEX(o.source_sha256) source_sha,HEX(o.target_sha256) target_sha,o.source_file_id,o.target_file_id,s.canonical_file_id source_canonical,t.canonical_file_id target_canonical,k.relative_path survivor_path,k.is_present survivor_present,k.canonical_file_id survivor_canonical FROM file_operations o JOIN files s ON s.id=o.source_file_id JOIN files t ON t.id=o.target_file_id LEFT JOIN files k ON k.id=s.canonical_file_id AND k.id=t.canonical_file_id WHERE o.id=@id FOR UPDATE","@id",id);
+   if(rows.Count!=1)throw new GalleryError(404,"Operation not found.");var op=rows[0];
+   if(Text(op,"state")!="error"||Text(op,"operation_kind")!="deduplicate"||Text(op,"source_sha")!=Text(op,"target_sha")||Text(op,"source_canonical")==""||Text(op,"source_canonical")!=Text(op,"target_canonical")||!Convert.ToBoolean(op["survivor_present"])||Text(op,"survivor_canonical")!="")throw new GalleryError(409,"The records do not identify one surviving copy of the expected file. Keep this issue open and locate or restore the files.");
+   var links=DBRows(db,tx,"SELECT (SELECT COUNT(*) FROM inventory_entries WHERE file_id IN (@source,@target)) entries,(SELECT COUNT(*) FROM fm_external_bindings WHERE file_id IN (@source,@target)) bindings","@source",op["source_file_id"],"@target",op["target_file_id"])[0];
+   if(Convert.ToInt64(links["entries"])!=0||Convert.ToInt64(links["bindings"])!=0)throw new GalleryError(409,"Entries or downloader links still point to an old file ID. This needs manual repair.");
+   foreach(var key in new[]{"source_path","target_path"}){string old=RecoveryReviewPath(Root,Text(op,key));if(File.Exists(old))throw new GalleryError(409,"An original copy still exists. Keep both files or review the copies before resolving.");}
+   string path=RecoveryReviewPath(Root,Text(op,"survivor_path"));
+   if(!File.Exists(path))throw new GalleryError(409,"The saved copy is unavailable. Reconnect storage or restore this image, then try again.");
+   using(var stream=new FileStream(path,FileMode.Open,FileAccess.Read,FileShare.Read))if(HashStream(stream)!=Text(op,"source_sha").ToLowerInvariant())throw new GalleryError(409,"The surviving file does not match the expected SHA-256. No change made.");
+   DBExec(db,tx,"UPDATE file_operations SET state='cancelled',completed_at=UTC_TIMESTAMP(6) WHERE id=@id AND state='error'","@id",id);
+   tx.Commit();return new{message="Resolved. The saved copy was verified and the old cleanup task was closed."};
   }
  }
  public static object DatabaseHoldRecoveryOperation(Dictionary<string,object> payload){

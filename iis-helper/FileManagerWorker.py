@@ -287,6 +287,8 @@ def main(W,once=False):
     if once:return
     time.sleep(5);continue
    W.require_root()
+   import RecoveryActions
+   RecoveryActions.drain(W,db)
    if time.monotonic()-last_tags>=30:
     import TagSync
     TagSync.sync_batch(db,100)
@@ -296,7 +298,7 @@ def main(W,once=False):
    requested=W.state(db,'worker_requested').get('requested',False);imports=W.state(db,'import_updates').get('requested',False)
    if not moved and (time.monotonic()-last_scan>300 or requested or imports):
     W.progress(db,'Discovering collections and checking file changes')
-    if last_scan==0:W.recover(db)
+    if last_scan==0 or requested:W.recover(db)
     count=reconcile(W,db);last_scan=time.monotonic()
     scanned=True
     W.import_documents(db,imports)

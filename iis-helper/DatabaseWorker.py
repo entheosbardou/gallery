@@ -693,11 +693,18 @@ def recovery_file(db,file_id,recorded_path,expected):
   rows=q(db,'SELECT f.*,c.collection_key AS owner FROM fm_file_catalog f JOIN collections c ON c.id=f.collection_id WHERE f.id=%s',(f['canonical_file_id'],))
  return None
 
-def recover(db):
- ops=q(db,"SELECT * FROM file_operations WHERE state IN ('planned','copied','linked','error') ORDER BY id")
+def recover(db,operation_id=None):
+ require_root()
+ ops=q(db,"SELECT * FROM file_operations WHERE state IN ('planned','copied','linked','error')"+(" AND id=%s" if operation_id is not None else "")+" ORDER BY id",(operation_id,) if operation_id is not None else ())
  total=len(ops);review=q(db,"SELECT COUNT(*) n FROM file_operations WHERE state='error' AND (error='Missing source has different bytes; recovery needs review' OR error='Downloader MD5 differs from the actual file; original retained')")[0]['n']
  review_issues=[{'file':r['source_path'],'error':'Operation '+str(r['id'])+' needs review: source missing and retained file has different bytes'} for r in q(db,"SELECT id,source_path FROM file_operations WHERE state='error' AND error='Missing source has different bytes; recovery needs review' ORDER BY id LIMIT 10")]
  for index,op in enumerate(ops):
+  if operation_id is None and index%10==0:
+   import RecoveryActions
+   RecoveryActions.drain(sys.modules[__name__],db)
+  fresh=q(db,'SELECT * FROM file_operations WHERE id=%s',(op['id'],))
+  if not fresh or fresh[0]['state'] in ('complete','cancelled'):continue
+  op=fresh[0]
   if index%10==0:progress(db,'Recovering file operations',index,total,recovery_processed=index,recovery_total=total,recovery_review=review,issues=review_issues)
   if op['state']=='error' and (op['error'] or '').startswith('On hold: '):continue
   try:
@@ -752,6 +759,7 @@ def recover(db):
       if hashstream(original)!=bytes(op['source_sha256']):raise RuntimeError('Recovery original changed')
       if op['operation_kind']=='deduplicate':
        backup=backup_folder(op['id'],source.stat().st_size);saved=backup/source.name
+       if saved.exists() and filehash(saved)!=bytes(op['source_sha256']):saved=backup/(str(source_row['id'])+'-'+source.name)
        if not saved.exists():
         with saved.open('xb') as dest:shutil.copyfileobj(original,dest)
         original.seek(0)
