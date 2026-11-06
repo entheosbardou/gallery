@@ -37,6 +37,31 @@
 
 # Project status
 
+## 2026-11-06 11:41 MST — Status page sign-in return fixed
+
+- Live IIS requests showed the status API returning 200 until 11:36:09 MST, then 401 at 11:36:12. Gallery's preceding OIDC callback was at 11:21:12, matching the application's 15-minute browser cookie. Authentik signed in again, but Gallery's callback sent the browser to `/`. This did not represent an Authentik logout.
+- The status page now sends a single reauthentication redirect when multiple component requests receive 401 together. Login stores only the allowlisted `/status.html` return path in the protected flow cookie, and callback returns there; direct unauthenticated status-page requests retain the same return path. No session lifetime or access policy changed.
+- JavaScript syntax and release build passed. Narrow release passed preflight and deployed to `bens-pc`; backup: `C:\downloads\gallery\change-backups\github-release-20261106-114047`. Immediately afterward, the app pool was Started, worker task Running, and an unauthenticated `/status.html` request redirected to `/auth/login?next=%2Fstatus.html`. The status API returned 401 without authentication. A full authenticated expiration-and-return cycle remains unverified.
+
+## 2026-11-06 11:29 MST — Four parallel visual match comparisons deployed
+
+- The file manager still claims up to 10 jobs per pass, but now prepares match jobs and performs exact duplicate/file mutations serially, runs up to four visual candidate comparisons on independent database connections, then finishes file organization serially. Collection moves, recovery, hash jobs, and downloader synchronization remain serialized by the coordinator. No schema changes.
+- `bens-pc` had 16 logical processors and about 34 GB free physical memory during inspection. A synthetic eight-job check reached four concurrent visual comparisons and verified that file organization waited until all comparisons finished. Python syntax and release build passed.
+- A narrow release passed preflight and was deployed to `bens-pc`; backup: `C:\downloads\gallery\change-backups\github-release-20261106-112817`. The live worker source hash matched the release, the app pool was Started, and the worker task restarted as Running. The queue had 33,444 pending match jobs and six failed hash jobs before deployment. An immediate bounded follow-up still showed 33,444 pending match jobs while the worker log reported recovery operations with absent paths. Production throughput improvement and completion of the recovery pass were not verified; no continuing monitoring was started. Source changes remain local and unpushed.
+
+## 2026-11-06 11:19 MST — Collection move status and clear job labels deployed
+
+- Added an administrator-only Collection moves card with separate queued, running, and failed counts; individual entry/destination and file progress; failed-move retry; and recent completions in a section collapsed by default. The file-job card now identifies hashing, matching, and reconciliation jobs separately. Worker text names its recorded counts instead of saying only “Processing changes.” Recent worker, scan, download-error, and issue details are collapsed by default.
+- A one-time read-only live query found no open collection moves, recent completed move 18, 33,472 pending image-matching jobs, 2 leased image-matching jobs, and 6 failed hash jobs. This is a snapshot, not monitoring.
+- JavaScript syntax and release build passed. Narrow release passed preflight and deployed to `bens-pc`; backup: `C:\downloads\gallery\change-backups\github-release-20261106-111818`. Immediately afterward, the app pool was Started, database worker task Running, anonymous status page access redirected (302), and anonymous move-status API access returned 401. Authenticated rendering and failed-move retry remain unverified live. Source changes are local and unpushed.
+
+## 2026-11-06 11:00 MST — Maintenance and error resolution moved to admin status page
+
+- Moved the main page's totals, worker/recovery progress, scan issues, recovery review dialog, downloader access indicators, and maintenance controls to `/status.html`. The main browsing page retains only the basic Gallery download queue indicator; detailed download errors appear on the status page. Recovery choices continue through the existing verified worker action endpoints.
+- Added independently refreshing inventory and downloader-access cards. `/status.html`, `/status.js`, and `/recovery.js` are administrator-only static paths, and `/api/system-status` checks administrator role. The page's maintenance controls use the existing admin-only endpoints.
+- JavaScript syntax, diff checks, and release build passed. A narrow release passed preflight and was deployed to `bens-pc`; backup: `C:\downloads\gallery\change-backups\github-release-20261106-105934`. Immediately afterward, the app pool was Started and worker task Running. Anonymous requests to the three status page assets redirected to sign-in (302), and the status API returned 401.
+- Authenticated rendering and an actual recovery decision on the page were not exercised. Source changes remain local and unpushed.
+
 ## 2026-11-06 10:50 MST — Independent system status page deployed
 
 - Added an administrator-only `/status.html` page linked from Gallery. Worker, file work queue, recovery, latest scan, download queue, and issue examples each request their own read-only `/api/system-status?component=...` data and refresh independently about every 15–30 seconds. Each card shows its own check time or error; the worker card also flags stale updates.

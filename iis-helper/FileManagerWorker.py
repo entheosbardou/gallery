@@ -1,5 +1,6 @@
 """Incremental file manager: bounded database work and indexed duplicate candidates."""
 import os,time,json,hashlib,uuid,traceback,datetime
+from concurrent.futures import ThreadPoolExecutor,as_completed
 from pathlib import Path
 import FileManager as F
 
@@ -159,11 +160,11 @@ def save_match(W,db,a,b,kind,distance=None):
  algorithm={'exact_file':'sha256','exact_pixels':'pillow-rgba-frames-sha256','visual_similarity':'dhash64'}[kind]
  F.execute(db,"INSERT INTO duplicate_matches(file_id_low,file_id_high,match_kind,algorithm,algorithm_version,distance,review_state,low_source_byte_size,low_source_modified_utc_ticks,high_source_byte_size,high_source_modified_utc_ticks,detected_at,notes) VALUES(%s,%s,%s,%s,'1',%s,%s,%s,%s,%s,%s,UTC_TIMESTAMP(6),%s) ON DUPLICATE KEY UPDATE distance=VALUES(distance),detected_at=VALUES(detected_at)",(low['id'],high['id'],kind,algorithm,distance,'pending' if kind=='visual_similarity' else 'confirmed',low['bytes'],low['ticks'],high['bytes'],high['ticks'],'Human review required' if kind=='visual_similarity' else 'Indexed exact comparison'))
 
-def compare(W,db,fid,work_id=None):
+def compare(W,db,fid,work_id=None,phase='both'):
  a=enriched(W,db,fid)
  if not a:return True
  # Hash lookups replace the former all-files Cartesian comparison.
- for kind,value,algorithm in [('file_sha256',a['file_sha256'],'sha256'),('pixel_sha256',a['pixel_sha256'],'pillow-rgba-frames-sha256')]:
+ for kind,value,algorithm in ([] if phase=='visual' else [('file_sha256',a['file_sha256'],'sha256'),('pixel_sha256',a['pixel_sha256'],'pillow-rgba-frames-sha256')]):
   if value is None:continue
   last=0
   while True:
@@ -184,7 +185,7 @@ def compare(W,db,fid,work_id=None):
     F.execute(db,'INSERT INTO fm_deferred_files(file_id,reason) VALUES(%s,%s) ON DUPLICATE KEY UPDATE reason=VALUES(reason)',(fid,reason or why))
     return True
    if len(candidates)<100:break
- if a['visual_hash'] is None:return True
+ if phase=='exact' or a['visual_hash'] is None:return True
  progress=F.rows(db,'SELECT last_candidate_id FROM fm_match_progress WHERE work_id=%s',(work_id,)) if work_id else []
  bands=list(F.visual_bands(a['visual_hash']));last=progress[0]['last_candidate_id'] if progress else 0;examined=0
  predicates=' OR '.join('(band=%s AND band_value=%s)' for _ in bands);params=[v for pair in bands for v in pair]
@@ -276,6 +277,54 @@ def process(W,db,token,job):
    else:F.execute(db,'INSERT INTO fm_deferred_files(file_id,reason) VALUES(%s,%s) ON DUPLICATE KEY UPDATE reason=VALUES(reason)',(fid,reason))
  F.execute(db,'UPDATE fm_work_items SET state=%s,lease_owner=NULL,lease_token=NULL,lease_expires_at=NULL,error=NULL WHERE id=%s AND lease_token=%s',(state,job['id'],token))
 
+def match_ready(db,job):
+ current=F.rows(db,'SELECT * FROM fm_file_catalog WHERE id=%s',(job['file_id'],))
+ return bool(current and current[0]['is_present'] and not current[0]['canonical_file_id'] and current[0]['byte_size']==job['expected_size'] and current[0]['modified_utc_ticks']==job['expected_ticks'])
+
+def match_visual(W,job):
+ # Each comparison has its own connection; no file moves or consolidation run in this phase.
+ with W.connect() as db:return compare(W,db,job['file_id'],job['id'],phase='visual')
+
+def process_batch(W,db,token,jobs):
+ prepared=[];results={}
+ for job in jobs:
+  if job['task_kind']!='match_file' or not match_ready(db,job):
+   try:process(W,db,token,job)
+   except Exception as error:record_failure(db,token,job,error)
+   continue
+  try:
+   fid=job['file_id'];manual_entry(W,db,fid);verify_downloader_post(W,db,fid)
+   compare(W,db,fid,job['id'],phase='exact');prepared.append(job)
+  except Exception as error:record_failure(db,token,job,error)
+ if prepared:
+  with ThreadPoolExecutor(max_workers=4,thread_name_prefix='gallery-match') as pool:
+   futures={pool.submit(match_visual,W,job):job for job in prepared}
+   for future in as_completed(futures):
+    job=futures[future]
+    try:results[job['id']]=future.result()
+    except Exception as error:results[job['id']]=error
+  # Apply catalog/file mutations only after every parallel comparison has stopped.
+  for job in prepared:
+   result=results[job['id']]
+   if isinstance(result,Exception):record_failure(db,token,job,result);continue
+   try:
+    if not result:
+     F.execute(db,"UPDATE fm_work_items SET state='pending',available_at=UTC_TIMESTAMP(6),lease_owner=NULL,lease_token=NULL,lease_expires_at=NULL WHERE id=%s AND lease_token=%s",(job['id'],token));continue
+    if not match_ready(db,job):state='cancelled'
+    else:
+     fid=job['file_id'];current=F.rows(db,'SELECT relative_path FROM fm_file_catalog WHERE id=%s',(fid,))[0]
+     allowed,reason=can_manage(db,current['relative_path'],fid)
+     if allowed:W.organize(db,[fid])
+     else:F.execute(db,'INSERT INTO fm_deferred_files(file_id,reason) VALUES(%s,%s) ON DUPLICATE KEY UPDATE reason=VALUES(reason)',(fid,reason))
+     state='completed'
+    F.execute(db,'UPDATE fm_work_items SET state=%s,lease_owner=NULL,lease_token=NULL,lease_expires_at=NULL,error=NULL WHERE id=%s AND lease_token=%s',(state,job['id'],token))
+   except Exception as error:record_failure(db,token,job,error)
+
+def record_failure(db,token,job,error):
+ db.rollback()
+ F.execute(db,"UPDATE fm_work_items SET state=IF(failure_count>=4,'failed','pending'),failure_count=failure_count+1,available_at=DATE_ADD(UTC_TIMESTAMP(6),INTERVAL 60 SECOND),error=%s,lease_token=NULL,lease_owner=NULL,lease_expires_at=NULL WHERE id=%s AND lease_token=%s",(str(error),job['id'],token))
+ print('Work item '+str(job['id'])+': '+''.join(traceback.format_exception(error)),flush=True)
+
 def main(W,once=False):
  last_scan=0;last_status=None;last_metrics=0;last_tags=0;pending=dirty=failed=0;issues=[]
  while True:
@@ -309,13 +358,8 @@ def main(W,once=False):
    if scanned:CurrentLocations.housekeeping(db)
    indexed=F.drain(db,batches=2)
    token,jobs=claim(db)
-   for job in jobs:
-    try:
-     process(W,db,token,job)
-     CollectionMoves.process(W,db)
-    except Exception as error:
-     db.rollback();F.execute(db,"UPDATE fm_work_items SET state=IF(failure_count>=4,'failed','pending'),failure_count=failure_count+1,available_at=DATE_ADD(UTC_TIMESTAMP(6),INTERVAL 60 SECOND),error=%s,lease_token=NULL,lease_owner=NULL,lease_expires_at=NULL WHERE id=%s AND lease_token=%s",(str(error),job['id'],token))
-     print(traceback.format_exc(),flush=True)
+   process_batch(W,db,token,jobs)
+   CollectionMoves.process(W,db)
    if scanned or time.monotonic()-last_metrics>=30:
     pending=F.rows(db,"SELECT COUNT(*) n FROM fm_work_items WHERE state IN ('pending','leased')")[0]['n'];dirty=F.rows(db,'SELECT COUNT(*) n FROM fm_entry_dirty')[0]['n']+F.rows(db,'SELECT COUNT(*) n FROM fm_file_dirty')[0]['n'];failed=F.rows(db,"SELECT COUNT(*) n FROM fm_work_items WHERE state='failed'")[0]['n']
     issues=F.rows(db,"SELECT f.relative_path file,w.error FROM fm_work_items w JOIN fm_file_catalog f ON f.id=w.file_id WHERE w.state='failed' ORDER BY w.id LIMIT 10");last_metrics=time.monotonic()

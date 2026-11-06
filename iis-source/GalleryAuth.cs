@@ -51,7 +51,7 @@ public static class GalleryAuth {
  public static string[] Groups(HttpContext c){return c.Items["GalleryGroups"] as string[]??new string[0];}
  public static string[] Categories(HttpContext c){return c.Items["GalleryCategories"] as string[]??(Enabled?new string[0]:Gallery.AccessCategories);}
  public static bool NeedsAdmin(string path,string method,string rescan){
-  string route=HttpUtility.UrlDecode(path).TrimEnd('/').ToLowerInvariant();if(route.Split('/').Any(part=>new[]{"access.html","access.js","status.html","status.js"}.Contains(part.Split(';')[0].TrimEnd(' ','.'))))return true;if(!route.StartsWith("/api/"))return false;route=route.Substring(5);
+  string route=HttpUtility.UrlDecode(path).TrimEnd('/').ToLowerInvariant();if(route.Split('/').Any(part=>new[]{"access.html","access.js","status.html","status.js","recovery.js"}.Contains(part.Split(';')[0].TrimEnd(' ','.'))))return true;if(!route.StartsWith("/api/"))return false;route=route.Substring(5);
   return (method!="GET"&&method!="HEAD") || !(route=="image"||((route=="inventory"||route=="inventory-meta"||route=="entry-files"||route=="asset")&&rescan!="1"));
  }
  static void Deny(HttpContext c,int code,string message){c.Response.StatusCode=code;c.Response.TrySkipIisCustomErrors=true;c.Response.SuppressFormsAuthenticationRedirect=true;c.Response.ContentType="application/json";c.Response.Write(Gallery.Json.Serialize(new{error=message,login=PublicUrl+"/auth/login"}));c.ApplicationInstance.CompleteRequest();}
@@ -65,7 +65,7 @@ public static class GalleryAuth {
   if(loopback&&c.Request.HttpMethod=="GET"&&path=="/api/downloads"&&Setting("workerKey").Length>=32&&Equal(c.Request.Headers["X-Gallery-Worker"],Setting("workerKey"))){c.Items["GalleryRole"]="worker";return;}
   if(path=="/auth/login"||path=="/auth/callback"||path=="/auth/signed-out"||path=="/auth/logout")return;
   var session=ReadCookie(c,SessionCookie);
-  if(session==null||!session.ContainsKey("groups")){if(path.StartsWith("/api/")||path=="/auth/session"||path=="/auth/session.js"){Deny(c,401,"Sign in to the gallery.");return;}c.Response.Redirect(PublicUrl+"/auth/login",false);c.ApplicationInstance.CompleteRequest();return;}
+  if(session==null||!session.ContainsKey("groups")){if(path.StartsWith("/api/")||path=="/auth/session"||path=="/auth/session.js"){Deny(c,401,"Sign in to the gallery.");return;}string next=new[]{"/status.html","/status.js","/recovery.js"}.Contains(path)?"?next=%2Fstatus.html":"";c.Response.Redirect(PublicUrl+"/auth/login"+next,false);c.ApplicationInstance.CompleteRequest();return;}
   var groups=Gallery.Json.Deserialize<string[]>(Gallery.Json.Serialize(session["groups"]));var grant=Gallery.GrantForGroups(groups);if(!grant.allowed){Deny(c,403,"Your account does not have gallery access.");return;}string role=grant.admin?"admins":"users";c.Items["GalleryGroups"]=groups;c.Items["GalleryCategories"]=grant.categories;
   c.Items["GalleryRole"]=role;c.Items["GalleryName"]=Gallery.Text(session,"name");c.User=new GenericPrincipal(new GenericIdentity(Gallery.Text(session,"name"),"Authentik"),role=="admins"?new[]{"admins","users"}:new[]{"users"});Thread.CurrentPrincipal=c.User;
   if(NeedsAdmin(path,c.Request.HttpMethod,c.Request.QueryString["rescan"])&&role!="admins")Deny(c,403,"Only gallery administrators can perform this action.");
@@ -76,7 +76,8 @@ public static class GalleryAuth {
   // Never trust a caller-supplied Host or forwarded URL when constructing callbacks.
   var origin=new Uri(PublicUrl);if(c.Request.Url.Host!=origin.Host){c.Response.Redirect(PublicUrl+"/auth/login",false);return;}
   string state=Random(),nonce=Random(),verifier=Random(),challenge;using(var sha=SHA256.Create())challenge=Base64UrlEncoder.Encode(sha.ComputeHash(System.Text.Encoding.ASCII.GetBytes(verifier)));
-  SetCookie(c,FlowCookie,new{state=state,nonce=nonce,verifier=verifier,expires=UnixNow+300},300);
+  string next=c.Request.QueryString["next"]=="/status.html"?"/status.html":"/";
+  SetCookie(c,FlowCookie,new{state=state,nonce=nonce,verifier=verifier,next=next,expires=UnixNow+300},300);
   var md=Metadata();c.Response.Redirect(md.AuthorizationEndpoint+"?client_id="+HttpUtility.UrlEncode(Setting("clientId"))+"&redirect_uri="+HttpUtility.UrlEncode(PublicUrl+"/auth/callback")+"&response_type=code&scope=openid%20profile%20email%20gallery_roles&state="+state+"&nonce="+nonce+"&code_challenge_method=S256&code_challenge="+challenge,false);
  }
  public static void Callback(HttpContext c){
@@ -92,7 +93,7 @@ public static class GalleryAuth {
   var groups=principal.FindAll("gallery_groups").Select(x=>x.Value).Distinct(StringComparer.OrdinalIgnoreCase).ToArray();var grant=Gallery.GrantForGroups(groups);
   if(!grant.allowed)throw new GalleryError(403,"Your account does not have gallery access. Contact a gallery administrator.");
   long expiry=Math.Min(new DateTimeOffset(jwt.ValidTo).ToUnixTimeSeconds(),UnixNow+900);var name=principal.FindFirst("preferred_username")??principal.FindFirst("name")??principal.FindFirst("sub");
-  SetCookie(c,SessionCookie,new{subject=jwt.Subject,name=name.Value,groups=groups,expires=expiry},Math.Max(1,(int)(expiry-UnixNow)));c.Response.Redirect(PublicUrl+"/",false);
+  SetCookie(c,SessionCookie,new{subject=jwt.Subject,name=name.Value,groups=groups,expires=expiry},Math.Max(1,(int)(expiry-UnixNow)));c.Response.Redirect(PublicUrl+(Gallery.Text(flow,"next")=="/status.html"?"/status.html":"/"),false);
  }
  public static void Logout(HttpContext c){if(c.Request.HttpMethod!="POST"||c.Request.Headers["Origin"]!=PublicUrl||c.Request.Headers["X-Gallery-Request"]!="1")throw new GalleryError(403,"Use the gallery sign-out control.");Expire(c,SessionCookie);c.Response.ContentType="application/json";c.Response.Write("{\"signedOut\":true}");}
 }

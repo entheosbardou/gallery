@@ -97,14 +97,17 @@ public static partial class Gallery {
   if(component=="worker"||component=="issues"){
    var rows=DBRows(db,null,"SELECT value FROM gallery_state WHERE state_key='worker_status' LIMIT 1");
    data=rows.Count==0?null:Json.DeserializeObject(Text(rows[0],"value"));
-  }else if(component=="work")data=new{work_items=DBRows(db,null,"SELECT state,COUNT(*) n FROM fm_work_items GROUP BY state"),dirty_index=DBRows(db,null,"SELECT (SELECT COUNT(*) FROM fm_entry_dirty)+(SELECT COUNT(*) FROM fm_file_dirty) n")[0]["n"]};
+  }else if(component=="work")data=new{work_items=DBRows(db,null,"SELECT state,COUNT(*) n FROM fm_work_items GROUP BY state"),tasks=DBRows(db,null,"SELECT task_kind,state,COUNT(*) n FROM fm_work_items WHERE state IN ('pending','leased','failed') GROUP BY task_kind,state"),dirty_index=DBRows(db,null,"SELECT (SELECT COUNT(*) FROM fm_entry_dirty)+(SELECT COUNT(*) FROM fm_file_dirty) n")[0]["n"]};
   else if(component=="recovery")data=DBRows(db,null,"SELECT state,COUNT(*) n FROM file_operations WHERE state IN ('planned','copied','linked','error') GROUP BY state");
+  else if(component=="moves")data=new{counts=DBRows(db,null,"SELECT state,COUNT(*) n FROM fm_collection_moves WHERE state IN ('pending','running','failed') GROUP BY state"),items=DBRows(db,null,"SELECT m.id,m.entry_id,m.state,m.error,e.revision current_revision,e.source_id,c.collection_key target_collection,(SELECT COUNT(*) FROM fm_collection_move_files f WHERE f.move_id=m.id) total,(SELECT COUNT(*) FROM fm_collection_move_files f WHERE f.move_id=m.id AND f.state='completed') processed FROM fm_collection_moves m JOIN inventory_entries e ON e.id=m.entry_id JOIN collections c ON c.id=COALESCE(m.target_collection_id,e.collection_id) WHERE m.state IN ('pending','running','failed') ORDER BY CASE m.state WHEN 'running' THEN 0 WHEN 'pending' THEN 1 ELSE 2 END,m.id DESC LIMIT 20"),recent=DBRows(db,null,"SELECT m.id,m.entry_id,m.completed_at,e.source_id,c.collection_key target_collection FROM fm_collection_moves m JOIN inventory_entries e ON e.id=m.entry_id JOIN collections c ON c.id=e.collection_id WHERE m.state='completed' ORDER BY m.completed_at DESC,m.id DESC LIMIT 5")};
   else if(component=="scan")data=DBRows(db,null,"SELECT id,state,started_at,finished_at,files_seen,files_processed,errors FROM scan_runs ORDER BY id DESC LIMIT 1").FirstOrDefault();
   else if(component=="downloads"){
    var rows=DBRows(db,null,"SELECT value FROM gallery_state WHERE state_key='download_queue' LIMIT 1");
    var item=rows.Count==0?new Dictionary<string,object>():Json.Deserialize<Dictionary<string,object>>(Text(rows[0],"value"));
-   data=new{phase=Text(item,"phase"),processed=Text(item,"processed"),total=item.ContainsKey("entries")?((IList)item["entries"]).Count:0,saved=Text(item,"saved"),failed=Text(item,"failed"),updated_utc=Text(item,"updated_utc")};
-  }else throw new GalleryError(400,"Choose a valid status component.");
+   data=new{phase=Text(item,"phase"),processed=Text(item,"processed"),total=item.ContainsKey("entries")?((IList)item["entries"]).Count:0,saved=Text(item,"saved"),failed=Text(item,"failed"),updated_utc=Text(item,"updated_utc"),errors=item.ContainsKey("errors")?((IList)item["errors"]).Cast<object>().Take(20).ToArray():new object[0]};
+  }else if(component=="inventory")data=new{saved=DBRows(db,null,"SELECT COUNT(*) n FROM files WHERE is_present=TRUE AND canonical_file_id IS NULL")[0]["n"],records=DBRows(db,null,"SELECT COUNT(*) n FROM inventory_entries WHERE deleted_at IS NULL")[0]["n"],collections=DBRows(db,null,"SELECT COUNT(*) n FROM fm_collection_discovery WHERE is_marked=TRUE")[0]["n"]};
+  else if(component=="services")data=new{wallhaven=WallhavenKeyAvailable(),reddit=RedditSessionAvailable()};
+  else throw new GalleryError(400,"Choose a valid status component.");
   return new{checked_utc=DateTime.UtcNow.ToString("o"),data=data};
  }}
  public static object DatabaseSystemStatus(){using(var db=OpenDatabase()){
