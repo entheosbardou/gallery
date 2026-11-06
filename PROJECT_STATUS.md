@@ -1,3 +1,9 @@
+## 2026-11-06 13:40 MST — Direct page jump deployed
+
+- Both page controls now accept a page number and Enter. The API accepts `page` and uses a single offset query for that page under the existing collection/category access filters; cursor clients remain supported. Invalid or out-of-range page numbers are rejected.
+- Commit `3beb277` on `fix/gallery-session-renewal` passed JavaScript syntax, diff, and release build checks. A narrow release passed preflight and deployed to `bens-pc`; backup: `C:\downloads\gallery\change-backups\github-release-20261106-133947`. Live HTML, JavaScript, and DLL hashes matched the build. The app pool was Started and worker task Running immediately afterward.
+- Authenticated page 81 interaction and production query latency remain unverified. The branch is local and unpushed.
+
 ## 2026-11-06 13:29 MST — Page controls deployed on session-renewal branch
 
 - Added matching Previous, page number, and Next controls before and after the media cards on `fix/gallery-session-renewal`. Both controls share the existing cursor navigation state. No API or schema change.
