@@ -51,12 +51,12 @@ public static partial class Gallery {
  public static object DatabaseInventoryPage(HttpContext context){
   using(var db=OpenDatabase()){
    var scope=BrowseScope(context,db,true);int limit;if(!Int32.TryParse(context.Request.QueryString["limit"],out limit))limit=60;limit=Math.Max(1,Math.Min(5000,limit));bool descending=context.Request.QueryString["sort"]!="oldest";string requestedPage=context.Request.QueryString["page"];long page=1;if(requestedPage!=null&&(!Int64.TryParse(requestedPage,out page)||page<1))throw new GalleryError(400,"Choose a valid page number.");if(requestedPage!=null&&!String.IsNullOrEmpty(context.Request.QueryString["cursor"]))throw new GalleryError(400,"Choose a page or a cursor, not both.");long after=requestedPage==null?(String.IsNullOrEmpty(context.Request.QueryString["cursor"])?(descending?Int64.MaxValue:0):ReadPageCursor(context.Request.QueryString["cursor"],scope.fingerprint)):0;
-   long total=Convert.ToInt64(DBRows(db,null,"SELECT COUNT(*) n FROM inventory_entries e JOIN collections c ON c.id=e.collection_id WHERE "+scope.where,scope.args.ToArray())[0]["n"]);
-   if(requestedPage!=null&&page>Math.Max(1,(total+limit-1)/limit))throw new GalleryError(400,"That page is beyond the matching results.");
+   bool deferCount=context.Request.QueryString["defer_count"]=="1";long? total=deferCount?(long?)null:CountInventory(db,scope);
+   if(requestedPage!=null&&total.HasValue&&page>Math.Max(1,(total.Value+limit-1)/limit))throw new GalleryError(400,"That page is beyond the matching results.");
    string boundary=requestedPage==null?" AND e.id"+(descending?"<":">")+Param(scope.args,after):"";
    string take=Param(scope.args,limit+1),offset=requestedPage==null?"":Param(scope.args,(page-1)*limit)+",";
    string sql="SELECT e.id AS entry_id,e.revision,e.site,e.source_id,e.record_type,e.status,COALESCE(NULLIF(e.category,''),'not_provided') category,LEFT(e.description,4096) description,e.source_url,e.image_url,e.resolution,c.collection_key,m.reason,m.error FROM inventory_entries e JOIN collections c ON c.id=e.collection_id LEFT JOIN fm_entry_metadata m ON m.legacy_entry_id=e.id WHERE "+scope.where+boundary+" ORDER BY e.id "+(descending?"DESC":"ASC")+" LIMIT "+offset+take;
-   var source=DBRows(db,null,sql,scope.args.ToArray());bool more=source.Count>limit;if(more)source.RemoveAt(source.Count-1);
+   var source=DBRows(db,null,sql,scope.args.ToArray());bool more=source.Count>limit;if(more)source.RemoveAt(source.Count-1);if(deferCount&&requestedPage!=null&&page>1&&source.Count==0)throw new GalleryError(400,"That page is beyond the matching results.");
    var records=new List<Dictionary<string,object>>();var lookup=new Dictionary<long,Dictionary<string,object>>();
    foreach(var row in source){var r=new Dictionary<string,object>();foreach(string field in new[]{"site","record_type","status","category","description","resolution","reason","error"})if(row[field]!=null)r[field]=row[field];r["entry_id"]=row["entry_id"];r["revision"]=row["revision"];r["id"]=row["source_id"];r["collection"]=row["collection_key"];if(row["source_url"]!=null)r["source"]=row["source_url"];if(row["image_url"]!=null)r["url"]=row["image_url"];r["entry_token"]=BitConverter.ToString(DatabaseHash(Text(row,"entry_id")+"|"+Text(row,"revision"))).Replace("-","");lookup[Convert.ToInt64(row["entry_id"])]=r;records.Add(r);}
    if(records.Count>0){
@@ -76,6 +76,8 @@ public static partial class Gallery {
    return new{records=records,total=total,next_cursor=more&&records.Count>0?PageCursor(Convert.ToInt64(source.Last()["entry_id"]),scope.fingerprint):null,has_more=more,page_size=limit,paged=true,categories=scope.categories,restricted=!scope.admin&&scope.categories.Length<AccessCategories.Length,issues=new string[0],root=scope.admin?Root:""};
   }
  }
+ static long CountInventory(MySqlConnection db,PageScope scope){return Convert.ToInt64(DBRows(db,null,"SELECT COUNT(*) n FROM inventory_entries e JOIN collections c ON c.id=e.collection_id WHERE "+scope.where,scope.args.ToArray())[0]["n"]);}
+ public static object DatabaseInventoryCount(HttpContext context){using(var db=OpenDatabase()){var scope=BrowseScope(context,db,true);return new{total=CountInventory(db,scope)};}}
  public static List<GalleryQueueItem> DatabaseFilteredDownloadItems(HttpContext context){
   using(var db=OpenDatabase()){
    var scope=BrowseScope(context,db,true);
