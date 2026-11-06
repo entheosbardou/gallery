@@ -37,6 +37,15 @@
 
 # Project status
 
+## 2026-11-05 19:06 MST — Gallery batch lookup confirmed with tablet sync
+
+- The user confirmed that Open Wallpaper successfully synced the Gallery playlist to the tablet after the paired deployment. This is user-reported end-to-end confirmation of the authenticated batch lookup in the working integration. Individual denied-file behavior and the exact deployed Open Wallpaper image digest were not independently checked here.
+
+## 2026-11-05 19:01 MST — Batch media lookup deployed
+
+- Built the Gallery release in an isolated copy and staged only the new `WallpaperGallery.dll` plus unchanged live files required by the deploy validator. `Deploy-OnHost.ps1 -ValidateOnly` passed on `bens-pc`, then the narrow release was deployed. Backup: `C:\downloads\gallery\change-backups\github-release-20261105-190019`.
+- The live DLL SHA256 matches the built release (`3788EA716080A53E8A077705A182D4CDEC5838B8DB1F97F31B9BDDD8454C758A`). The site and app pool were Started and the database worker task Running immediately afterward. An unauthenticated `POST /api/external/media/resolve` returned HTTP 401. Authenticated batch decisions and Open Wallpaper tablet sync remain unverified live.
+
 ## 2026-11-05 18:51 MST — Batch media permission lookup in source
 
 - Added `POST /api/external/media/resolve` to check up to 500 file IDs with one OIDC identity and return current paths for allowed files. The shared lookup now applies the caller's collection and category grants. This supports Open Wallpaper device sync without per-image catalog requests or a stored Gallery device grant. An isolated `Build-Release.ps1` build succeeded with compiler dependency warnings. Source only; deployment and live permission checks remain outstanding.
