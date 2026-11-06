@@ -1,7 +1,7 @@
-## 2026-11-06 13:30 MST — Page controls added on session-renewal branch
+## 2026-11-06 13:29 MST — Page controls deployed on session-renewal branch
 
 - Added matching Previous, page number, and Next controls before and after the media cards on `fix/gallery-session-renewal`. Both controls share the existing cursor navigation state. No API or schema change.
-- JavaScript syntax, diff checks, and release build passed in the isolated branch worktree. This page-control change has not been deployed or pushed; browser interaction remains unverified.
+- JavaScript syntax, diff checks, and release build passed in the isolated branch worktree. A narrow release passed preflight and deployed to `bens-pc`; backup: `C:\downloads\gallery\change-backups\github-release-20261106-132856`. The live HTML and JavaScript SHA256 hashes matched the branch files. The app pool was Started and worker task Running immediately afterward. Authenticated browser interaction remains unverified. The branch has not been pushed.
 
 ## 2026-11-05 12:09 -07:00 — Full recovery decision controls deployed
 
