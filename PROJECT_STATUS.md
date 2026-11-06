@@ -37,6 +37,12 @@
 
 # Project status
 
+## 2026-11-06 10:50 MST — Independent system status page deployed
+
+- Added an administrator-only `/status.html` page linked from Gallery. Worker, file work queue, recovery, latest scan, download queue, and issue examples each request their own read-only `/api/system-status?component=...` data and refresh independently about every 15–30 seconds. Each card shows its own check time or error; the worker card also flags stale updates.
+- Local release build, JavaScript syntax, and diff checks passed. A narrow release was validated and deployed to `bens-pc`; backup: `C:\downloads\gallery\change-backups\github-release-20261106-104923`. Live page, script, and DLL hashes matched the release. The app pool was Started, the database worker task Running, and unauthenticated API access returned 401 immediately afterward.
+- Authenticated rendering and per-component API responses were not verified live. No monitoring was started. Source changes remain local and have not been pushed.
+
 ## 2026-11-05 19:06 MST — Gallery batch lookup confirmed with tablet sync
 
 - The user confirmed that Open Wallpaper successfully synced the Gallery playlist to the tablet after the paired deployment. This is user-reported end-to-end confirmation of the authenticated batch lookup in the working integration. Individual denied-file behavior and the exact deployed Open Wallpaper image digest were not independently checked here.

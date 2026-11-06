@@ -92,6 +92,31 @@ public static partial class Gallery {
  public static void RequestDatabaseImportUpdates(){SetDatabaseState("import_updates",new{requested=true});}
  public static object RequestDatabaseWorker(){SetDatabaseState("worker_requested",new{requested=true});var current=DatabaseState("worker_status") as Dictionary<string,object>;if(current!=null&&Text(current,"phase")=="scanning")return current;var result=new{phase="scanning",message="Background database processing requested."};SetDatabaseState("worker_status",result);return result;}
  public static object DatabaseWorkerStatus(){return DatabaseState("worker_status")??new{phase="idle"};}
+ public static object DatabaseSystemComponent(string component){using(var db=OpenDatabase()){
+  object data;
+  if(component=="worker"||component=="issues"){
+   var rows=DBRows(db,null,"SELECT value FROM gallery_state WHERE state_key='worker_status' LIMIT 1");
+   data=rows.Count==0?null:Json.DeserializeObject(Text(rows[0],"value"));
+  }else if(component=="work")data=new{work_items=DBRows(db,null,"SELECT state,COUNT(*) n FROM fm_work_items GROUP BY state"),dirty_index=DBRows(db,null,"SELECT (SELECT COUNT(*) FROM fm_entry_dirty)+(SELECT COUNT(*) FROM fm_file_dirty) n")[0]["n"]};
+  else if(component=="recovery")data=DBRows(db,null,"SELECT state,COUNT(*) n FROM file_operations WHERE state IN ('planned','copied','linked','error') GROUP BY state");
+  else if(component=="scan")data=DBRows(db,null,"SELECT id,state,started_at,finished_at,files_seen,files_processed,errors FROM scan_runs ORDER BY id DESC LIMIT 1").FirstOrDefault();
+  else if(component=="downloads"){
+   var rows=DBRows(db,null,"SELECT value FROM gallery_state WHERE state_key='download_queue' LIMIT 1");
+   var item=rows.Count==0?new Dictionary<string,object>():Json.Deserialize<Dictionary<string,object>>(Text(rows[0],"value"));
+   data=new{phase=Text(item,"phase"),processed=Text(item,"processed"),total=item.ContainsKey("entries")?((IList)item["entries"]).Count:0,saved=Text(item,"saved"),failed=Text(item,"failed"),updated_utc=Text(item,"updated_utc")};
+  }else throw new GalleryError(400,"Choose a valid status component.");
+  return new{checked_utc=DateTime.UtcNow.ToString("o"),data=data};
+ }}
+ public static object DatabaseSystemStatus(){using(var db=OpenDatabase()){
+  var worker=DBRows(db,null,"SELECT value FROM gallery_state WHERE state_key='worker_status' LIMIT 1");
+  var work=DBRows(db,null,"SELECT state,COUNT(*) n FROM fm_work_items GROUP BY state");
+  var operations=DBRows(db,null,"SELECT state,COUNT(*) n FROM file_operations WHERE state IN ('planned','copied','linked','error') GROUP BY state");
+  var dirty=DBRows(db,null,"SELECT (SELECT COUNT(*) FROM fm_entry_dirty)+(SELECT COUNT(*) FROM fm_file_dirty) n");
+  var scan=DBRows(db,null,"SELECT id,state,started_at,finished_at,files_seen,files_processed,errors FROM scan_runs ORDER BY id DESC LIMIT 1");
+  var downloadRows=DBRows(db,null,"SELECT value FROM gallery_state WHERE state_key='download_queue' LIMIT 1");
+  var download=downloadRows.Count==0?new Dictionary<string,object>():Json.Deserialize<Dictionary<string,object>>(Text(downloadRows[0],"value"));
+  return new{checked_utc=DateTime.UtcNow.ToString("o"),worker=worker.Count==0?null:Json.DeserializeObject(Text(worker[0],"value")),work_items=work,dirty_index=dirty[0]["n"],file_operations=operations,latest_scan=scan.Count==0?null:scan[0],downloads=new{phase=Text(download,"phase"),processed=Text(download,"processed"),total=download.ContainsKey("entries")?((IList)download["entries"]).Count:0,saved=Text(download,"saved"),failed=Text(download,"failed"),updated_utc=Text(download,"updated_utc")}};
+ }}
  public static object DatabaseRecoveryOperations(string requestedId){long id=0;if(requestedId!=""&&(!Int64.TryParse(requestedId,out id)||id<1))throw new GalleryError(400,"Enter a valid operation ID.");using(var db=OpenDatabase()){
   var total=Convert.ToInt64(DBRows(db,null,"SELECT COUNT(*) n FROM file_operations WHERE state='error'")[0]["n"]);
   var items=DBRows(db,null,"SELECT o.id,o.operation_kind,o.state,o.error,o.source_path,o.target_path,HEX(o.source_sha256) expected_source_sha256,HEX(o.target_sha256) expected_target_sha256,o.source_file_id,o.target_file_id,s.relative_path current_source_path,(SELECT c.collection_key FROM fm_file_catalog fc JOIN collections c ON c.id=fc.collection_id WHERE fc.id=o.source_file_id) source_collection,s.is_present source_catalog_present,s.canonical_file_id source_canonical_file_id,t.relative_path current_target_path,(SELECT c.collection_key FROM fm_file_catalog fc JOIN collections c ON c.id=fc.collection_id WHERE fc.id=o.target_file_id) target_collection,t.is_present target_catalog_present,t.canonical_file_id target_canonical_file_id,k.relative_path survivor_path,(SELECT c.collection_key FROM fm_file_catalog fc JOIN collections c ON c.id=fc.collection_id WHERE fc.id=k.id) survivor_collection,k.is_present survivor_catalog_present,(SELECT COUNT(*) FROM inventory_entries e WHERE e.file_id=o.source_file_id) source_entry_links,(SELECT COUNT(*) FROM fm_external_bindings b WHERE b.file_id=o.source_file_id) source_downloader_links FROM file_operations o LEFT JOIN files s ON s.id=o.source_file_id LEFT JOIN files t ON t.id=o.target_file_id LEFT JOIN files k ON k.id=s.canonical_file_id AND k.id=t.canonical_file_id WHERE o.state='error' AND (@id=0 OR o.id=@id) ORDER BY CASE WHEN o.error IN ('Missing source has different bytes; recovery needs review','Downloader MD5 differs from the actual file; original retained') THEN 0 ELSE 1 END,o.id LIMIT 50","@id",id);

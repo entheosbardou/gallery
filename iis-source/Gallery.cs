@@ -51,6 +51,7 @@ public class GalleryHandler : IHttpHandler {
             if(route=="downloads" && c.Request.HttpMethod=="GET") { Reply(c,200,Gallery.DownloadQueueStatus()); return; }
             if(route=="duplicates" && c.Request.HttpMethod=="GET") { Reply(c,200,Gallery.DuplicateStatus()); return; }
             if(route=="database-status" && c.Request.HttpMethod=="GET") { Reply(c,200,Gallery.DatabaseWorkerStatus()); return; }
+            if(route=="system-status" && c.Request.HttpMethod=="GET") { if(!GalleryAuth.IsAdmin(c))throw new GalleryError(403,"Only administrators can view system status.");Reply(c,200,Gallery.DatabaseSystemComponent(c.Request.QueryString["component"]??""));return; }
             if(route=="recovery-action-status" && c.Request.HttpMethod=="GET") { if(!GalleryAuth.IsAdmin(c))throw new GalleryError(403,"Only administrators can review recovery decisions.");Reply(c,200,Gallery.DatabaseRecoveryActionStatus(c.Request.QueryString["ids"]??""));return; }
             if(route=="recovery-operations" && c.Request.HttpMethod=="GET") { if(!GalleryAuth.IsAdmin(c))throw new GalleryError(403,"Only gallery administrators can review file operations.");Reply(c,200,Gallery.DatabaseRecoveryOperations(c.Request.QueryString["id"]??"") );return; }
             if(route=="retry-recovery-operation" && c.Request.HttpMethod=="POST") { if(!GalleryAuth.IsAdmin(c))throw new GalleryError(403,"Only gallery administrators can retry file operations.");Reply(c,202,Gallery.RequestDatabaseWorker());return; }

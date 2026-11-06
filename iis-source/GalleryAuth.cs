@@ -51,7 +51,7 @@ public static class GalleryAuth {
  public static string[] Groups(HttpContext c){return c.Items["GalleryGroups"] as string[]??new string[0];}
  public static string[] Categories(HttpContext c){return c.Items["GalleryCategories"] as string[]??(Enabled?new string[0]:Gallery.AccessCategories);}
  public static bool NeedsAdmin(string path,string method,string rescan){
-  string route=HttpUtility.UrlDecode(path).TrimEnd('/').ToLowerInvariant();if(route.Split('/').Any(part=>new[]{"access.html","access.js"}.Contains(part.Split(';')[0].TrimEnd(' ','.'))))return true;if(!route.StartsWith("/api/"))return false;route=route.Substring(5);
+  string route=HttpUtility.UrlDecode(path).TrimEnd('/').ToLowerInvariant();if(route.Split('/').Any(part=>new[]{"access.html","access.js","status.html","status.js"}.Contains(part.Split(';')[0].TrimEnd(' ','.'))))return true;if(!route.StartsWith("/api/"))return false;route=route.Substring(5);
   return (method!="GET"&&method!="HEAD") || !(route=="image"||((route=="inventory"||route=="inventory-meta"||route=="entry-files"||route=="asset")&&rescan!="1"));
  }
  static void Deny(HttpContext c,int code,string message){c.Response.StatusCode=code;c.Response.TrySkipIisCustomErrors=true;c.Response.SuppressFormsAuthenticationRedirect=true;c.Response.ContentType="application/json";c.Response.Write(Gallery.Json.Serialize(new{error=message,login=PublicUrl+"/auth/login"}));c.ApplicationInstance.CompleteRequest();}
