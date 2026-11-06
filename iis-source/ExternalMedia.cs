@@ -22,10 +22,11 @@ public static partial class Gallery {
  static List<long> ExternalIds(Dictionary<string,object> body){try{object raw;if(!body.TryGetValue("file_ids",out raw)||raw==null)throw new Exception();var ids=Json.Deserialize<long[]>(Json.Serialize(raw)).Distinct().ToList();if(ids.Count==0||ids.Count>500||ids.Any(x=>x<1))throw new Exception();return ids;}catch{throw new GalleryError(400,"Provide between 1 and 500 valid Gallery file IDs.");}}
  static Dictionary<long,Dictionary<string,object>> ExternalFiles(IEnumerable<long> ids,string[] groups,GalleryAccessPolicy policy){
   var wanted=ids.Distinct().ToList();var result=new Dictionary<long,Dictionary<string,object>>();if(wanted.Count==0)return result;
+  var rights=Gallery.GrantForGroups(groups,policy);if(!rights.allowed)return result;
   using(var db=OpenDatabase()){
    var args=new List<object>();string placeholders=String.Join(",",wanted.Select((x,i)=>{string key="@id"+i;args.Add(key);args.Add(x);return key;}));
    var rows=DBRows(db,null,"SELECT requested.id requested_id,f.id,f.relative_path,f.byte_size,f.width,f.height,f.access_category,c.collection_key FROM fm_file_catalog requested JOIN fm_file_catalog f ON f.id=COALESCE(requested.canonical_file_id,requested.id) JOIN collections c ON c.id=f.collection_id JOIN fm_collection_discovery d ON d.collection_id=c.id AND d.is_marked=TRUE WHERE requested.id IN ("+placeholders+") AND f.is_present=TRUE AND f.canonical_file_id IS NULL AND NOT EXISTS(SELECT 1 FROM fm_file_dirty pending WHERE pending.file_id=f.id)",args.ToArray());
-   foreach(var f in rows){string collection=Text(f,"collection_key"),category=Text(f,"access_category");if(!Gallery.CollectionAccessAllowed(groups,collection,policy)||!Gallery.AccessCategories.Contains(category))continue;string path=Text(f,"relative_path");result[Convert.ToInt64(f["requested_id"])]=new Dictionary<string,object>{{"file_id",f["id"]},{"relative_path",path},{"byte_size",f["byte_size"]},{"width",f["width"]},{"height",f["height"]},{"category",category},{"collection",collection},{"name",Path.GetFileName(path)},{"mime",ExternalMime(path)}};}
+   foreach(var f in rows){string collection=Text(f,"collection_key"),category=Text(f,"access_category");if(!Gallery.CollectionAccessAllowed(groups,collection,policy)||!rights.categories.Contains(category))continue;string path=Text(f,"relative_path");result[Convert.ToInt64(f["requested_id"])]=new Dictionary<string,object>{{"file_id",f["id"]},{"relative_path",path},{"byte_size",f["byte_size"]},{"width",f["width"]},{"height",f["height"]},{"category",category},{"collection",collection},{"name",Path.GetFileName(path)},{"mime",ExternalMime(path)}};}
    return result;
   }
  }
@@ -56,6 +57,11 @@ public static partial class Gallery {
    }
    return new{collections=items,categories=categories};
   }
+ }
+ static object ExternalResolveMedia(HttpContext c,Dictionary<string,object> body){
+  var principal=ExternalPrincipal(c);var groups=ExternalGroups(principal);var policy=Gallery.GetAccessPolicy();var rights=Gallery.GrantForGroups(groups,policy);if(!rights.allowed)throw new GalleryError(403,"This identity has no Gallery media access.");
+  var ids=ExternalIds(body);var access=ExternalFiles(ids,groups,policy);
+  return new{items=ids.Select(id=>{Dictionary<string,object> media;bool allowed=access.TryGetValue(id,out media);return new{file_id=id,status=allowed?"allowed":"denied",media=allowed?media:null};}).ToArray()};
  }
  static object ExternalCreateGrant(HttpContext c,Dictionary<string,object> body){
   var principal=ExternalPrincipal(c);var groups=ExternalGroups(principal);var files=ExternalIds(body);string refresh=ExternalText(body,"refresh_token"),device=ExternalText(body,"device_id"),instance=ExternalText(body,"client_instance");if(String.IsNullOrEmpty(refresh)||refresh.Length>8192||String.IsNullOrWhiteSpace(device)||device.Length>128||String.IsNullOrWhiteSpace(instance)||instance.Length>128)throw new GalleryError(400,"A refresh token, client instance, and device ID are required.");
@@ -90,6 +96,7 @@ public static partial class Gallery {
   try{
    string path=c.Request.Path.TrimEnd('/').ToLowerInvariant();object result;
    if(path=="/api/external/media"&&c.Request.HttpMethod=="GET")result=ExternalCatalog(c);
+   else if(path=="/api/external/media/resolve"&&c.Request.HttpMethod=="POST")result=ExternalResolveMedia(c,ReadExternalBody(c));
    else if(path=="/api/external/collections"&&c.Request.HttpMethod=="GET")result=ExternalCollections(c);
    else if(path=="/api/external/grants"&&c.Request.HttpMethod=="POST")result=ExternalCreateGrant(c,ReadExternalBody(c));
    else if(path=="/api/external/grants/authorize"&&c.Request.HttpMethod=="POST")result=ExternalAuthorizeGrant(c,ReadExternalBody(c));

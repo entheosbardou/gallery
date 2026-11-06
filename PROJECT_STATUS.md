@@ -37,6 +37,10 @@
 
 # Project status
 
+## 2026-11-05 18:51 MST — Batch media permission lookup in source
+
+- Added `POST /api/external/media/resolve` to check up to 500 file IDs with one OIDC identity and return current paths for allowed files. The shared lookup now applies the caller's collection and category grants. This supports Open Wallpaper device sync without per-image catalog requests or a stored Gallery device grant. An isolated `Build-Release.ps1` build succeeded with compiler dependency warnings. Source only; deployment and live permission checks remain outstanding.
+
 The original repository snapshot and later timestamped entries record evidence available at their respective observation times. This is not a live status monitor.
 
 ## 2026-11-04 23:20 MST â€” External media connection active

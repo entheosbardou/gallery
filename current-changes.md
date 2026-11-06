@@ -1,5 +1,7 @@
 # Current changes — Gallery
 
+- Add a bearer authenticated `POST /api/external/media/resolve` lookup for 1–500 file IDs. Return current paths only for files allowed by the caller's collection and category grants. Open Wallpaper uses it for batched tablet sync; this Gallery source change is not deployed.
+
 - Collection response now includes accessible category names; media requests can filter by category. Deployed to the live Gallery IIS installation. Authenticated category response remains unverified because Open Wallpaper's stored OIDC credential failed its identity match check.
 
 - Recovery errors now remain attached to individual file operations while the worker continues. Administrators can hold and resume an operation in the review dialog. Live recovery completion and the missing files in operation 12719 remain to be reviewed.
