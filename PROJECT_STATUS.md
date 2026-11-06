@@ -1,3 +1,8 @@
+## 2026-11-06 13:30 MST — Page controls added on session-renewal branch
+
+- Added matching Previous, page number, and Next controls before and after the media cards on `fix/gallery-session-renewal`. Both controls share the existing cursor navigation state. No API or schema change.
+- JavaScript syntax, diff checks, and release build passed in the isolated branch worktree. This page-control change has not been deployed or pushed; browser interaction remains unverified.
+
 ## 2026-11-05 12:09 -07:00 — Full recovery decision controls deployed
 
 - Duplicate issues expose keep-first, keep-second, keep-both and retry; moves expose finish-move and keep-original-location. Every issue also offers restoring a selected copy from its operation backup or locating a matching copy inside wallpaper storage. Technical details are collapsed. Queued decisions execute under the existing worker account/lock and show results beside the issue. Completed issues clear from the open panel automatically.
