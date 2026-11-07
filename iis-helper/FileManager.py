@@ -1,5 +1,8 @@
 """Relational gallery index. All catalog batches are bounded and restartable."""
-import json,hashlib,time,uuid,datetime,re
+import json,hashlib,time,uuid,datetime,re,threading
+
+# Structural asset writes must not interleave with duplicate-link transactions.
+asset_write_lock=threading.RLock()
 
 def rows(db,sql,args=()):
  with db.cursor() as c:c.execute(sql,args);return list(c.fetchall())
@@ -235,14 +238,19 @@ def auto_bind_wallpaper(db,f):
   execute(db,'INSERT INTO fm_external_entries VALUES(%s,%s,%s,%s,%s) ON DUPLICATE KEY UPDATE entry_id=VALUES(entry_id),source_revision=VALUES(source_revision),file_id=VALUES(file_id)',(config['integration_id'],post['id'],eid,post['indexed_at'],f['id']))
   execute(db,"INSERT INTO inventory_entry_history(entry_id,revision,action,new_record,actor) SELECT id,revision,'external_source_updated',raw_record,'Wallpaper downloader adapter' FROM inventory_entries WHERE id=%s",(eid,))
 
-def drain(db,batches=4,size=100):
+def drain(db,batches=4,size=100,kind='both'):
+ with asset_write_lock:return _drain_unlocked(db,batches,size,kind)
+
+def _drain_unlocked(db,batches=4,size=100,kind='both'):
  """Generation-checked deletes cannot erase a concurrently queued update."""
+ if kind not in ('both','entry','file'):raise ValueError('Unknown index kind')
  done=0
- for _ in range(batches):
-  dirty=rows(db,'SELECT entry_id,generation FROM fm_entry_dirty ORDER BY entry_id LIMIT %s',(size,))
-  if not dirty:break
+ for _ in range(batches if kind in ('both','entry') else 0):
   db.begin()
   try:
+   dirty=rows(db,'SELECT entry_id,generation FROM fm_entry_dirty ORDER BY entry_id LIMIT %s FOR UPDATE SKIP LOCKED',(size,))
+   if not dirty:
+    db.rollback();break
    for item in dirty:
     source=rows(db,'SELECT * FROM inventory_entries WHERE id=%s FOR UPDATE',(item['entry_id'],))
     if source:index_entry(db,source[0])
@@ -250,11 +258,12 @@ def drain(db,batches=4,size=100):
     done+=1
    db.commit()
   except Exception:db.rollback();raise
- for _ in range(batches):
-  dirty=rows(db,'SELECT file_id,generation FROM fm_file_dirty ORDER BY file_id LIMIT %s',(size,))
-  if not dirty:break
+ for _ in range(batches if kind in ('both','file') else 0):
   db.begin()
   try:
+   dirty=rows(db,'SELECT file_id,generation FROM fm_file_dirty ORDER BY file_id LIMIT %s FOR UPDATE SKIP LOCKED',(size,))
+   if not dirty:
+    db.rollback();break
    for item in dirty:
     source=rows(db,'SELECT f.*,c.collection_key AS owner FROM fm_file_catalog f JOIN collections c ON c.id=f.collection_id WHERE f.id=%s FOR UPDATE',(item['file_id'],))
     if source:index_file(db,source[0])

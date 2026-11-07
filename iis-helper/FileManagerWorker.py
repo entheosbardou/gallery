@@ -1,8 +1,68 @@
 """Incremental file manager: bounded database work and indexed duplicate candidates."""
-import os,time,json,hashlib,uuid,traceback,datetime
-from concurrent.futures import ThreadPoolExecutor,as_completed
+import os,time,json,hashlib,uuid,traceback,datetime,threading,random
+from collections import deque
+from concurrent.futures import ThreadPoolExecutor,wait,FIRST_COMPLETED
+from contextlib import contextmanager
 from pathlib import Path
 import FileManager as F
+
+VISUAL_WORKERS=10
+MAX_VISUAL_WORKERS=16
+MUTATION_WORKERS=4
+INDEX_WORKERS=4
+INDEX_BATCH_SIZE=1
+MUTATION_CLAIM_PER_WORKER=10
+CLAIM_BATCH_SIZE=MUTATION_WORKERS*MUTATION_CLAIM_PER_WORKER
+MAX_PIPELINE_JOBS=CLAIM_BATCH_SIZE*2
+PIPELINE_SECONDS=300
+BACKLOG_SCAN_INTERVAL=1800
+_mutation_stripes=[threading.Lock() for _ in range(4096)]
+_activity_guard=threading.Lock()
+_activity={'visual':0,'mutation':0}
+_average_seconds={'visual':None,'mutation':None}
+_completed={'visual':0,'mutation':0}
+_index_guard=threading.Lock()
+_index_active=0
+_indexed_total=0
+
+def index_counts():
+ with _index_guard:return _index_active,_indexed_total
+
+@contextmanager
+def active_stage(name):
+ started=time.monotonic()
+ with _activity_guard:_activity[name]+=1
+ try:yield
+ finally:
+  elapsed=time.monotonic()-started
+  with _activity_guard:
+   _activity[name]-=1;_completed[name]+=1
+   old=_average_seconds[name];_average_seconds[name]=elapsed if old is None else old*.85+elapsed*.15
+
+def active_counts():
+ with _activity_guard:return dict(active=_activity.copy(),average_seconds=_average_seconds.copy(),completed=_completed.copy())
+
+def reset_activity_counts():
+ with _activity_guard:
+  for name in _activity:_average_seconds[name]=None;_completed[name]=0
+
+def recommended_visual_limit(limit,metrics,mutation_backlog,visual_backlog):
+ visual_seconds=metrics['average_seconds']['visual'];mutation_seconds=metrics['average_seconds']['mutation']
+ if (limit>=MAX_VISUAL_WORKERS or not visual_seconds or not mutation_seconds
+     or metrics['completed']['visual']<20 or metrics['completed']['mutation']<8
+     or mutation_backlog>=MUTATION_WORKERS or not visual_backlog):return limit
+ visual_rate=limit/visual_seconds;mutation_rate=MUTATION_WORKERS/mutation_seconds
+ return min(MAX_VISUAL_WORKERS,limit+2) if mutation_rate>visual_rate*1.15 else limit
+
+@contextmanager
+def mutation_locks(keys):
+ # Every worker acquires the same sorted key order, so overlapping groups wait
+ # without deadlocking; disjoint groups can modify files concurrently.
+ locks=[_mutation_stripes[index] for index in sorted({hash(key)%len(_mutation_stripes) for key in keys})]
+ for lock in locks:lock.acquire()
+ try:yield
+ finally:
+  for lock in reversed(locks):lock.release()
 
 def prepare_sync(db,source,target,root,source_stream=None,target_stream=None):
  import DownloaderLocations as D
@@ -131,12 +191,13 @@ def reconcile(W,db):
   F.execute(db,'UPDATE files f JOIN fm_file_catalog catalog ON catalog.id=f.id LEFT JOIN fm_seen_paths seen ON seen.path_key=f.path_key SET f.is_present=FALSE WHERE f.is_present=TRUE AND f.canonical_file_id IS NULL AND catalog.collection_id IN ('+','.join(['%s']*len(ids))+') AND seen.path_key IS NULL',ids)
  return count
 
-def claim(db):
+def claim(db,limit=CLAIM_BATCH_SIZE,kind='match_file'):
  token=uuid.uuid4().bytes
  db.begin()
  try:
   F.execute(db,"UPDATE fm_work_items SET state='pending',lease_owner=NULL,lease_token=NULL,lease_expires_at=NULL WHERE state='leased' AND lease_expires_at<UTC_TIMESTAMP(6)")
-  jobs=F.rows(db,"SELECT * FROM fm_work_items WHERE state='pending' AND available_at<=UTC_TIMESTAMP(6) ORDER BY priority,available_at,id LIMIT 10 FOR UPDATE SKIP LOCKED")
+  filter_sql=" AND task_kind='match_file'" if kind=='match_file' else " AND task_kind<>'match_file'"
+  jobs=F.rows(db,"SELECT * FROM fm_work_items WHERE state='pending' AND available_at<=UTC_TIMESTAMP(6)"+filter_sql+" ORDER BY priority,available_at,id LIMIT %s FOR UPDATE SKIP LOCKED",(limit,))
   for j in jobs:F.execute(db,"UPDATE fm_work_items SET state='leased',lease_owner=%s,lease_token=%s,lease_expires_at=DATE_ADD(UTC_TIMESTAMP(6),INTERVAL 10 MINUTE),attempts=attempts+1 WHERE id=%s",(str(os.getpid()),token,j['id']))
   db.commit();return token,jobs
  except Exception:db.rollback();raise
@@ -162,9 +223,10 @@ def save_match(W,db,a,b,kind,distance=None):
 
 def compare(W,db,fid,work_id=None,phase='both'):
  a=enriched(W,db,fid)
- if not a:return True
+ collecting=phase=='visual_collect';visual_matches=[]
+ if not a:return (True,visual_matches,0) if collecting else True
  # Hash lookups replace the former all-files Cartesian comparison.
- for kind,value,algorithm in ([] if phase=='visual' else [('file_sha256',a['file_sha256'],'sha256'),('pixel_sha256',a['pixel_sha256'],'pillow-rgba-frames-sha256')]):
+ for kind,value,algorithm in ([] if collecting else [('file_sha256',a['file_sha256'],'sha256'),('pixel_sha256',a['pixel_sha256'],'pillow-rgba-frames-sha256')]):
   if value is None:continue
   last=0
   while True:
@@ -185,7 +247,7 @@ def compare(W,db,fid,work_id=None,phase='both'):
     F.execute(db,'INSERT INTO fm_deferred_files(file_id,reason) VALUES(%s,%s) ON DUPLICATE KEY UPDATE reason=VALUES(reason)',(fid,reason or why))
     return True
    if len(candidates)<100:break
- if phase=='exact' or a['visual_hash'] is None:return True
+ if phase=='exact' or a['visual_hash'] is None:return (True,visual_matches,0) if collecting else True
  progress=F.rows(db,'SELECT last_candidate_id FROM fm_match_progress WHERE work_id=%s',(work_id,)) if work_id else []
  bands=list(F.visual_bands(a['visual_hash']));last=progress[0]['last_candidate_id'] if progress else 0;examined=0
  predicates=' OR '.join('(band=%s AND band_value=%s)' for _ in bands);params=[v for pair in bands for v in pair]
@@ -198,14 +260,16 @@ def compare(W,db,fid,work_id=None,phase='both'):
    if a['pixel_sha256'] is not None and a['pixel_sha256']==b['pixel_sha256'] and render_signature(a)==render_signature(b):continue
    if abs((a['display_width']/a['display_height'])/(b['display_width']/b['display_height'])-1)>.02:continue
    distance=(int.from_bytes(a['visual_hash'],'big')^int.from_bytes(b['visual_hash'],'big')).bit_count()
-   if distance<=5:save_match(W,db,a,b,'visual_similarity',distance)
+   if distance<=5:
+    if collecting:visual_matches.append((b['id'],distance))
+    else:save_match(W,db,a,b,'visual_similarity',distance)
   examined+=len(candidates)
-  if work_id:
+  if work_id and not collecting:
    F.execute(db,'INSERT INTO fm_match_progress VALUES(%s,%s) ON DUPLICATE KEY UPDATE last_candidate_id=VALUES(last_candidate_id)',(work_id,last))
-   if examined>=1000 and len(candidates)==250:return False
+  if work_id and examined>=1000 and len(candidates)==250:return (False,visual_matches,last) if collecting else False
   if len(candidates)<250:break
- if work_id:F.execute(db,'DELETE FROM fm_match_progress WHERE work_id=%s',(work_id,))
- return True
+ if work_id and not collecting:F.execute(db,'DELETE FROM fm_match_progress WHERE work_id=%s',(work_id,))
+ return (True,visual_matches,last) if collecting else True
 
 def manual_entry(W,db,fid):
  found=F.rows(db,'SELECT f.*,c.collection_key,d.id doc FROM fm_file_catalog f JOIN collections c ON c.id=f.collection_id JOIN inventory_documents d ON d.collection_id=c.id JOIN fm_collection_discovery m ON m.collection_id=c.id AND m.is_marked=TRUE WHERE f.id=%s AND f.is_present=TRUE AND f.canonical_file_id IS NULL',(fid,))
@@ -282,51 +346,184 @@ def match_ready(db,job):
  return bool(current and current[0]['is_present'] and not current[0]['canonical_file_id'] and current[0]['byte_size']==job['expected_size'] and current[0]['modified_utc_ticks']==job['expected_ticks'])
 
 def match_visual(W,job):
- # Each comparison has its own connection; no file moves or consolidation run in this phase.
- with W.connect() as db:return compare(W,db,job['file_id'],job['id'],phase='visual')
+ # A consistent read snapshot lets this stage overlap file changes safely.
+ with active_stage('visual'):
+  with W.connect() as db:
+   db.begin()
+   try:return compare(W,db,job['file_id'],job['id'],phase='visual_collect')
+   finally:db.rollback()
 
-def process_batch(W,db,token,jobs):
- prepared=[];results={}
- for job in jobs:
-  if job['task_kind']!='match_file' or not match_ready(db,job):
-   try:process(W,db,token,job)
-   except Exception as error:record_failure(db,token,job,error)
-   continue
+def apply_visual_matches(W,db,fid,matches):
+ a=enriched(W,db,fid)
+ if not a or a['visual_hash'] is None:return
+ for candidate_id,_ in matches:
+  b=enriched(W,db,candidate_id)
+  if not b or b['visual_hash'] is None:continue
+  if a['pixel_sha256'] is not None and a['pixel_sha256']==b['pixel_sha256'] and render_signature(a)==render_signature(b):continue
+  if abs((a['display_width']/a['display_height'])/(b['display_width']/b['display_height'])-1)>.02:continue
+  distance=(int.from_bytes(a['visual_hash'],'big')^int.from_bytes(b['visual_hash'],'big')).bit_count()
+  if distance<=5:save_match(W,db,a,b,'visual_similarity',distance)
+
+def mutation_keys(db,fid):
+ a=enriched(None,db,fid)
+ if not a:return [('file',fid)]
+ # Serialize shared files and destination paths, not an entire collection.
+ keys={('file',fid),('path',a['relative_path'].casefold())}
+ cats=[str(row['category'] or '').lower() for row in F.rows(db,'SELECT DISTINCT e.category FROM fm_entry_file_projection l JOIN inventory_entries e ON e.id=l.entry_id WHERE l.file_id=%s AND e.deleted_at IS NULL',(fid,))]
+ chosen=next((category for category in ('nsfw','sketchy','sfw') if category in cats),'not_provided')
+ target=Path(a['owner'],chosen,Path(a['relative_path']).name).as_posix()
+ keys.add(('path',target.casefold()))
+ for kind,value,algorithm in [('file_sha256',a['file_sha256'],'sha256'),('pixel_sha256',a['pixel_sha256'],'pillow-rgba-frames-sha256')]:
+  if value is None:continue
+  candidates=F.rows(db,"SELECT h.file_id,f.relative_path FROM file_hashes h JOIN fm_file_catalog f ON f.id=h.file_id WHERE h.hash_kind=%s AND h.algorithm=%s AND h.algorithm_version='1' AND h.hash_value=%s AND h.source_byte_size=f.byte_size AND h.source_modified_utc_ticks=f.modified_utc_ticks AND f.is_present=TRUE AND f.canonical_file_id IS NULL",(kind,algorithm,value))
+  keys.update(('file',row['file_id']) for row in candidates)
+  keys.update(('path',row['relative_path'].casefold()) for row in candidates)
+ return keys
+
+def mutate_match(W,token,job,visual_result):
+ with active_stage('mutation'):
   try:
-   fid=job['file_id'];manual_entry(W,db,fid);verify_downloader_post(W,db,fid)
-   compare(W,db,fid,job['id'],phase='exact');prepared.append(job)
-  except Exception as error:record_failure(db,token,job,error)
- if prepared:
-  with ThreadPoolExecutor(max_workers=4,thread_name_prefix='gallery-match') as pool:
-   futures={pool.submit(match_visual,W,job):job for job in prepared}
-   for future in as_completed(futures):
-    job=futures[future]
-    try:results[job['id']]=future.result()
-    except Exception as error:results[job['id']]=error
-  # Apply catalog/file mutations only after every parallel comparison has stopped.
-  for job in prepared:
-   result=results[job['id']]
-   if isinstance(result,Exception):record_failure(db,token,job,result);continue
-   try:
-    if not result:
-     F.execute(db,"UPDATE fm_work_items SET state='pending',available_at=UTC_TIMESTAMP(6),lease_owner=NULL,lease_token=NULL,lease_expires_at=NULL WHERE id=%s AND lease_token=%s",(job['id'],token));continue
-    if not match_ready(db,job):state='cancelled'
+   with W.connect() as db:
+    try:
+     for attempt in range(3):
+      keys=set(mutation_keys(db,job['file_id']))
+      with mutation_locks(keys):
+       if not set(mutation_keys(db,job['file_id'])).issubset(keys):continue
+       if not match_ready(db,job):state='cancelled'
+       else:
+        fid=job['file_id'];manual_entry(W,db,fid);verify_downloader_post(W,db,fid)
+        compare(W,db,fid,job['id'],phase='exact')
+        if not match_ready(db,job):state='cancelled'
+        elif isinstance(visual_result,Exception):raise visual_result
+        else:
+         visual_complete,visual_matches,visual_last=visual_result
+         apply_visual_matches(W,db,fid,visual_matches)
+         if not visual_complete:
+          F.execute(db,'INSERT INTO fm_match_progress VALUES(%s,%s) ON DUPLICATE KEY UPDATE last_candidate_id=VALUES(last_candidate_id)',(job['id'],visual_last))
+          F.execute(db,"UPDATE fm_work_items SET state='pending',available_at=UTC_TIMESTAMP(6),lease_owner=NULL,lease_token=NULL,lease_expires_at=NULL WHERE id=%s AND lease_token=%s",(job['id'],token));return
+         F.execute(db,'DELETE FROM fm_match_progress WHERE work_id=%s',(job['id'],))
+         current=F.rows(db,'SELECT relative_path FROM fm_file_catalog WHERE id=%s',(fid,))[0]
+         allowed,reason=can_manage(db,current['relative_path'],fid)
+         if allowed:W.organize(db,[fid])
+         else:F.execute(db,'INSERT INTO fm_deferred_files(file_id,reason) VALUES(%s,%s) ON DUPLICATE KEY UPDATE reason=VALUES(reason)',(fid,reason))
+         state='completed'
+       F.execute(db,'UPDATE fm_work_items SET state=%s,lease_owner=NULL,lease_token=NULL,lease_expires_at=NULL,error=NULL WHERE id=%s AND lease_token=%s',(state,job['id'],token))
+       return
+     raise RuntimeError('Exact-match files changed while acquiring mutation locks; retrying this job later.')
+    except Exception as error:
+     if getattr(error,'args',()) and error.args[0] in (1205,1213):
+      db.rollback()
+      F.execute(db,"UPDATE fm_work_items SET state='pending',available_at=DATE_ADD(UTC_TIMESTAMP(6),INTERVAL 60 SECOND),lease_owner=NULL,lease_token=NULL,lease_expires_at=NULL,error='Temporary database lock conflict; retrying' WHERE id=%s AND lease_token=%s",(job['id'],token))
+     else:record_failure(db,token,job,error)
+  except Exception as error:
+   # Connection failure before a job can be updated is retried when its lease expires.
+   print('Mutation work item '+str(job['id'])+': '+''.join(traceback.format_exception(error)),flush=True)
+
+def process_pipeline(W,db,once=False):
+ # The coordinator is the only claimer. Completed visual scans feed mutation
+ # workers immediately, while visual workers continue into the next claim.
+ deadline=time.monotonic()+(30 if once else PIPELINE_SECONDS)
+ waiting=deque();visual={};mutations=set();claimed=0;last_report=time.monotonic();last_tune=last_report;empty=False;visual_limit=VISUAL_WORKERS
+ last_visual=last_mutation=0;last_index=index_counts()[1]
+ reset_activity_counts()
+ with ThreadPoolExecutor(max_workers=MAX_VISUAL_WORKERS,thread_name_prefix='gallery-visual') as visual_pool,ThreadPoolExecutor(max_workers=MUTATION_WORKERS,thread_name_prefix='gallery-mutate') as mutation_pool:
+  while True:
+   capacity=MAX_PIPELINE_JOBS-len(waiting)-len(visual)-len(mutations)
+   if capacity>0 and (capacity>=CLAIM_BATCH_SIZE or (not waiting and len(visual)<visual_limit)) and not empty and time.monotonic()<deadline:
+    token,jobs=claim(db,min(CLAIM_BATCH_SIZE,capacity))
+    if jobs:
+     claimed+=len(jobs)
+     waiting.extend((token,job) for job in jobs)
+    else:empty=True
+   while waiting and len(visual)<visual_limit:
+    token,job=waiting.popleft();visual[visual_pool.submit(match_visual,W,job)]=(token,job)
+   if not waiting and not visual and not mutations:break
+   done,_=wait(set(visual)|mutations,timeout=5,return_when=FIRST_COMPLETED)
+   for future in done:
+    if future in visual:
+     token,job=visual.pop(future)
+     try:result=future.result()
+     except Exception as error:result=error
+     mutations.add(mutation_pool.submit(mutate_match,W,token,job,result))
     else:
-     fid=job['file_id'];current=F.rows(db,'SELECT relative_path FROM fm_file_catalog WHERE id=%s',(fid,))[0]
-     allowed,reason=can_manage(db,current['relative_path'],fid)
-     if allowed:W.organize(db,[fid])
-     else:F.execute(db,'INSERT INTO fm_deferred_files(file_id,reason) VALUES(%s,%s) ON DUPLICATE KEY UPDATE reason=VALUES(reason)',(fid,reason))
-     state='completed'
-    F.execute(db,'UPDATE fm_work_items SET state=%s,lease_owner=NULL,lease_token=NULL,lease_expires_at=NULL,error=NULL WHERE id=%s AND lease_token=%s',(state,job['id'],token))
-   except Exception as error:record_failure(db,token,job,error)
+     mutations.remove(future);future.result()
+   now=time.monotonic();metrics=active_counts()
+   if now-last_tune>=60:
+    visual_limit=recommended_visual_limit(visual_limit,metrics,len(mutations),bool(waiting or visual))
+    last_tune=now
+   if now-last_report>=30:
+    pending=F.rows(db,"SELECT COUNT(*) n FROM fm_work_items WHERE state IN ('pending','leased')")[0]['n']
+    dirty=F.rows(db,'SELECT (SELECT COUNT(*) FROM fm_entry_dirty)+(SELECT COUNT(*) FROM fm_file_dirty) n')[0]['n']
+    failed=F.rows(db,"SELECT COUNT(*) n FROM fm_work_items WHERE state='failed'")[0]['n']
+    index_active,indexed_total=index_counts()
+    minutes=(now-last_report)/60
+    visual_rate=round((metrics['completed']['visual']-last_visual)/minutes,1)
+    mutation_rate=round((metrics['completed']['mutation']-last_mutation)/minutes,1)
+    index_rate=round((indexed_total-last_index)/minutes,1)
+    W.progress(db,'Matching images through visual and file-change stages',phase='scanning',pending_work=pending,pending_index=dirty,failed_count=failed,visual_active=metrics['active']['visual'],visual_waiting=len(waiting),file_changes_active=metrics['active']['mutation'],file_changes_waiting=max(0,len(mutations)-metrics['active']['mutation']),visual_worker_limit=visual_limit,file_change_worker_limit=MUTATION_WORKERS,index_worker_limit=INDEX_WORKERS,index_active=index_active,indexed_total=indexed_total,visual_per_minute=visual_rate,file_changes_per_minute=mutation_rate,indexed_per_minute=index_rate,claimed_this_pass=claimed)
+    last_visual=metrics['completed']['visual'];last_mutation=metrics['completed']['mutation'];last_index=indexed_total
+    last_report=now
+ return claimed
 
 def record_failure(db,token,job,error):
  db.rollback()
  F.execute(db,"UPDATE fm_work_items SET state=IF(failure_count>=4,'failed','pending'),failure_count=failure_count+1,available_at=DATE_ADD(UTC_TIMESTAMP(6),INTERVAL 60 SECOND),error=%s,lease_token=NULL,lease_owner=NULL,lease_expires_at=NULL WHERE id=%s AND lease_token=%s",(str(error),job['id'],token))
  print('Work item '+str(job['id'])+': '+''.join(traceback.format_exception(error)),flush=True)
 
+def index_loop(W,kind):
+ # Each thread owns a connection. drain() locks and skips rows claimed by peers.
+ global _index_active,_indexed_total
+ while True:
+  db=None
+  try:
+   db=W.connect()
+   while True:
+    db.ping(reconnect=True)
+    with _index_guard:_index_active+=1
+    try:
+     try:indexed=F.drain(db,batches=1,size=INDEX_BATCH_SIZE,kind=kind)
+     except Exception as error:
+      if getattr(error,'args',()) and error.args[0] in (1205,1213):
+       # Shared assets can make unrelated entries contend. Retry the row.
+       time.sleep(random.uniform(.05,.2));continue
+      raise
+    finally:
+     with _index_guard:_index_active-=1
+    with _index_guard:_indexed_total+=indexed
+    if not indexed:time.sleep(1)
+  except Exception:
+   print('Index worker: '+traceback.format_exc(),flush=True)
+   time.sleep(2)
+  finally:
+   if db:
+    try:db.close()
+    except Exception:pass
+
+def tag_loop(W):
+ import TagSync
+ while True:
+  db=None
+  try:
+   db=W.connect()
+   while True:
+    db.ping(reconnect=True)
+    synced=TagSync.sync_batch(db,20)
+    time.sleep(5 if synced else 30)
+  except Exception:
+   print('Tag sync worker: '+traceback.format_exc(),flush=True)
+   time.sleep(2)
+  finally:
+   if db:
+    try:db.close()
+    except Exception:pass
+
 def main(W,once=False):
- last_scan=0;last_status=None;last_metrics=0;last_tags=0;pending=dirty=failed=0;issues=[]
+ if not once:
+  for index in range(INDEX_WORKERS):
+   kind='entry' if index==0 else 'file'
+   threading.Thread(target=index_loop,args=(W,kind),name='gallery-index-'+kind+'-'+str(index+1),daemon=True).start()
+  threading.Thread(target=tag_loop,args=(W,),name='gallery-tag-sync',daemon=True).start()
+ last_scan=0;last_status=None;last_metrics=0;pending=dirty=failed=0;issues=[]
  while True:
   db=None;scanned=False
   try:
@@ -338,16 +535,22 @@ def main(W,once=False):
    W.require_root()
    import RecoveryActions
    RecoveryActions.drain(W,db)
-   if time.monotonic()-last_tags>=30:
+   if once:
     import TagSync
     TagSync.sync_batch(db,100)
-    last_tags=time.monotonic()
    import CollectionMoves
    moved=CollectionMoves.process(W,db)
    requested=W.state(db,'worker_requested').get('requested',False);imports=W.state(db,'import_updates').get('requested',False)
-   if not moved and (time.monotonic()-last_scan>300 or requested or imports):
+   initial_scan_due=False
+   if last_scan==0:
+    W.progress(db,'Recovering file operations before matching images')
+    W.recover(db)
+    initial_scan_due=not F.rows(db,"SELECT id FROM fm_work_items WHERE task_kind='match_file' AND state='pending' LIMIT 1")
+    last_scan=time.monotonic()
+   scan_interval=BACKLOG_SCAN_INTERVAL if pending else 300
+   if not moved and (initial_scan_due or time.monotonic()-last_scan>scan_interval or requested or imports):
     W.progress(db,'Discovering collections and checking file changes')
-    if last_scan==0 or requested:W.recover(db)
+    if requested:W.recover(db)
     count=reconcile(W,db);last_scan=time.monotonic()
     scanned=True
     W.import_documents(db,imports)
@@ -356,15 +559,19 @@ def main(W,once=False):
     W.state(db,'worker_requested',{'requested':False})
    import CurrentLocations
    if scanned:CurrentLocations.housekeeping(db)
-   indexed=F.drain(db,batches=2)
-   token,jobs=claim(db)
-   process_batch(W,db,token,jobs)
+   indexed=F.drain(db,batches=2) if once else 0
+   token,jobs=claim(db,limit=20,kind='other')
+   for job in jobs:
+    try:process(W,db,token,job)
+    except Exception as error:record_failure(db,token,job,error)
+   matched=process_pipeline(W,db,once=once)
    CollectionMoves.process(W,db)
    if scanned or time.monotonic()-last_metrics>=30:
     pending=F.rows(db,"SELECT COUNT(*) n FROM fm_work_items WHERE state IN ('pending','leased')")[0]['n'];dirty=F.rows(db,'SELECT COUNT(*) n FROM fm_entry_dirty')[0]['n']+F.rows(db,'SELECT COUNT(*) n FROM fm_file_dirty')[0]['n'];failed=F.rows(db,"SELECT COUNT(*) n FROM fm_work_items WHERE state='failed'")[0]['n']
     issues=F.rows(db,"SELECT f.relative_path file,w.error FROM fm_work_items w JOIN fm_file_catalog f ON f.id=w.file_id WHERE w.state='failed' ORDER BY w.id LIMIT 10");last_metrics=time.monotonic()
-   if (pending,dirty)!=last_status or jobs or indexed or scanned:
-    W.progress(db,'File manager processing changes' if pending or dirty else 'Some files need attention' if failed else 'Collections are up to date',0,pending+dirty,phase='scanning' if pending or dirty else 'complete',pending_work=pending,pending_index=dirty,updated_files=indexed,failed_count=failed,issues=issues)
+   if (pending,dirty)!=last_status or jobs or matched or indexed or scanned:
+    index_active,indexed_total=index_counts()
+    W.progress(db,'File manager processing changes' if pending or dirty else 'Some files need attention' if failed else 'Collections are up to date',0,pending+dirty,phase='scanning' if pending or dirty else 'complete',pending_work=pending,pending_index=dirty,updated_files=indexed,failed_count=failed,issues=issues,index_worker_limit=INDEX_WORKERS,index_active=index_active,indexed_total=indexed_total)
     last_status=(pending,dirty)
   except Exception as error:
    print(traceback.format_exc(),flush=True)

@@ -288,17 +288,19 @@ def normalize_links(db):
 def rewrite_path(db,source,target,source_stream=None,target_stream=None):
  if not FMW.can_manage(db,source['relative_path'])[0] or not FMW.can_manage(db,target['relative_path'])[0]:raise RuntimeError('External file database is not ready; original retained')
  FMW.prepare_sync(db,source,target,ROOT,source_stream=source_stream,target_stream=target_stream)
- db.begin()
- try:
-  if source['id']!=target['id']:run(db,'UPDATE inventory_entries SET file_id=%s WHERE file_id=%s',(target['id'],source['id']))
-  if source['id']==target['id']:
-   run(db,'UPDATE files SET relative_path=%s,path_key=%s,file_name=%s WHERE id=%s',(target['relative_path'],pathkey(target['relative_path']),Path(target['relative_path']).name,source['id']))
-  else:
-   run(db,'UPDATE files SET canonical_file_id=%s WHERE canonical_file_id=%s',(target['id'],source['id']))
-   run(db,'UPDATE files SET canonical_file_id=%s,is_present=FALSE WHERE id=%s',(target['id'],source['id']))
-  FMW.synchronize_paths(db,source,target,ROOT)
-  db.commit()
- except Exception:db.rollback();raise
+ with FM.asset_write_lock:
+  db.begin()
+  try:
+   # All asset/index writers enter this transaction in the same order.
+   if source['id']!=target['id']:run(db,'UPDATE inventory_entries SET file_id=%s WHERE file_id=%s',(target['id'],source['id']))
+   if source['id']==target['id']:
+    run(db,'UPDATE files SET relative_path=%s,path_key=%s,file_name=%s WHERE id=%s',(target['relative_path'],pathkey(target['relative_path']),Path(target['relative_path']).name,source['id']))
+   else:
+    run(db,'UPDATE files SET canonical_file_id=%s WHERE canonical_file_id=%s',(target['id'],source['id']))
+    run(db,'UPDATE files SET canonical_file_id=%s,is_present=FALSE WHERE id=%s',(target['id'],source['id']))
+   FMW.synchronize_paths(db,source,target,ROOT)
+   db.commit()
+  except Exception:db.rollback();raise
 
 def protected(path,delete_access=False):
  import msvcrt

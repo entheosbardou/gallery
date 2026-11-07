@@ -1,3 +1,34 @@
+## 2026-11-06 18:32 MST — live conveyor check
+
+- Read-only `bens-pc` check: IIS site/pool were `Started`, the worker task was `Running`, and the worker reported at 18:31 MST. Completed image-match jobs rose from 33,539 at 17:22 MST to 38,282, about 68 per minute over the interval. Pending plus leased image-match jobs totaled 11,684. The entry and file index queues were both zero.
+- The current stage report showed about 212 visual comparisons and 208 file-change completions per minute; those are stage rates, not the end-to-end rate above. The adaptive visual limit was 12; four file-change workers remained configured.
+- Deduplication deadlock operations remained at zero, and no file-operation errors had been created in the preceding 15 minutes. The 49 other file-operation errors and six truncated-image hash failures remained; no image-match jobs were failed. About 800 pending image-match jobs still carried older lock-conflict retry text. No production data was changed during this check.
+
+## 2026-11-06 17:22 MST — post-recovery live check
+
+- Read-only `bens-pc` check: IIS site/pool were `Started`, the worker task was `Running`, and the worker reported at 17:22 MST. Completed image-match jobs rose from 31,760 at 16:08 MST to 33,539. Pending plus leased image-match jobs totaled 18,541. The entry and file index queues were both zero at the snapshot.
+- The 796 deduplication file operations marked with deadlock errors at deployment were no longer in `error`; current deadlock-operation count was zero. No file-operation error had been created in the preceding 15 minutes. The status report showed about 140 visual comparisons, 119 file-change completions, and 36 index updates per minute; these are stage rates, not a measured full-process rate.
+- 49 file operations still require attention for other reasons, including 12 downloader MD5 mismatches and missing paths. Six hash jobs remain failed on truncated images; no image-match jobs are failed. About 800 pending image-match jobs still carry an older temporary-lock-conflict message, with no such message dated after the 16:08 MST deployment; they remain eligible for retry. No production data was changed during this check.
+
+## 2026-11-06 16:08 MST — contention control deployed; recovery running
+
+- Reduced file-change concurrency from eight to four, per-worker claims from 20 to 10, and pipeline capacity from 320 to 80. The image comparison pool remains at ten initially. Structural index and duplicate-link database transactions now share a process lock; file verification and visual comparison remain outside it. No schema change.
+- Python syntax, an isolated release build, and synthetic conveyor/transaction-lock checks passed. On-host release validation passed. Deployed to `bens-pc`; backup: `C:\downloads\gallery\change-backups\github-release-20261106-160734`. The live worker files matched the staged hashes; IIS site/pool were `Started`, and the worker task was `Running`.
+- The worker started its existing byte-verified recovery pass at 16:07 MST. Its initial report counted 851 open file operations; at 16:08 MST, 796 were deduplication operations marked with deadlock errors, recovery had reported 0 of 851 processed, completed image-match jobs were 31,760, and failed image-match jobs were 0. Recovery completion, the post-change deadlock rate, and sustained throughput remain unverified. No separate production repair was run.
+
+## 2026-11-06 15:58 MST — one-hour live conveyor check
+
+- Read-only check on `bens-pc`: IIS site and pool were `Started`; the Gallery worker task and Python process were running. The worker reported at 15:58 MST.
+- Completed image-match jobs reached 31,729, up from 27,179 at the 14:52 MST deployment check. Pending/leased image-match jobs totaled about 20,700. Entry/file indexing queues were 16/23 at 15:57 MST. The six failed hash jobs were the previously known truncated images; no image-match job was in `failed` state.
+- This is not a low-error run. At 15:58 MST, 673 deduplication file operations were in `error` with database deadlocks, up from 667 about a minute earlier. Another 677 pending image-match jobs carried the temporary lock-conflict retry message. The latest worker rate was only 7.5 file-change completions/minute; completed image-match count was unchanged during that one-minute check. The deadlock operations require investigation and recovery; no repair or production mutation was performed in this check.
+
+## 2026-11-06 14:53 MST — parallel file changes and indexing deployed
+
+- The live Gallery on `bens-pc` now allows 8 concurrent file-change workers. Four dedicated indexing threads (one entry, three file) process distinct changes while image matching continues. Tag synchronization runs in a separate thread. The pipeline remains bounded with one job claimer. Routine collection scans run every 30 minutes while image work is backlogged; explicit scan requests still run promptly.
+- Indexing claims one row per transaction with `FOR UPDATE SKIP LOCKED` and generation-checked removal. Narrow file/path locks allow unrelated files in one collection to proceed together. Transient database lock conflicts requeue file jobs without using their failure allowance. Latest deployment backup: `C:\downloads\gallery\change-backups\github-release-20261106-145109`.
+- Python and JavaScript syntax checks, an isolated release build, and synthetic tests for conveyor concurrency, index claims, and transient lock retries passed. On-host release validation passed. The live IIS app pool and worker task were running and deployed file hashes matched the release.
+- In a brief live pipeline sample before the final lock-retry revision, the status reported about 168 visual comparisons, 125 file-change completions, and 129 index updates per minute; the index queue held 4 changes. These are stage counts, not completed image jobs. At 14:53 MST, the final revision was still recovering 134 interrupted file operations (70 processed), with 0 failed image-match jobs and 2 index changes waiting. Sustained throughput after this recovery pass remains unverified.
+
 ## 2026-11-05 12:09 -07:00 — Full recovery decision controls deployed
 
 - Duplicate issues expose keep-first, keep-second, keep-both and retry; moves expose finish-move and keep-original-location. Every issue also offers restoring a selected copy from its operation backup or locating a matching copy inside wallpaper storage. Technical details are collapsed. Queued decisions execute under the existing worker account/lock and show results beside the issue. Completed issues clear from the open panel automatically.
@@ -36,6 +67,26 @@
 - The live DLL SHA256 matches the built release (`9AAB04EFEA23E64CEED8E3A080458DE935EA5AAA7B8788B7D5ABE537D6652639`). The IIS site and app pool were Started and the worker task Running immediately afterward. Anonymous requests to `/api/external/collections` and `/api/external/media` both returned HTTP 401. The user confirmed authenticated collection listing and filtering work as expected.
 
 # Project status
+
+## 2026-11-06 13:15 MST — Active browser sessions renew on bens-pc
+
+- Gallery's browser cookie previously expired 15 minutes after sign-in even while the page was active. Authenticated requests now renew it during use, up to a fixed 24-hour sign-in limit. New sign-ins receive the new cookie format; existing sessions may need one final sign-in.
+- The release build passed. A narrow DLL-only release passed deployment preflight and was deployed to `bens-pc`; backup: `C:\downloads\gallery\change-backups\github-release-20261106-131540`. The live DLL hash matched the build (`2D1C34D09FD22A19835B0984DB13D6D3ADAE2D474C93949B8D1F0D91781E549C`), the app pool was Started, and the database worker task was Running immediately afterward.
+- Authenticated browser behavior across an actual renewal interval remains unverified. The change is local and unpushed. Other in-progress source changes were excluded from this deployment.
+
+## 2026-11-06 12:25 MST — Streaming matching conveyor deployed
+
+- Replaced the prior visual-then-mutation batch barrier with a bounded producer-consumer pipeline. One coordinator claims up to 80 match jobs at a time, with at most 160 jobs in the in-memory conveyor. Visual comparison results feed four file-change workers as they complete; the coordinator can claim the next jobs while both stages remain active. Nonmatching jobs, collection moves, recovery, and index draining remain outside this pipeline. Visual scans use a consistent database read snapshot; file-change workers recheck source/candidate state and acquire ordered locks on overlapping files and collections. Durable visual progress advances only after staged matches are applied.
+- Visual capacity starts at 10 and may rise by two every 60 seconds, up to 16, when completed-job timings show the four file-change workers can consume faster than visual workers produce and the mutation queue is short. Worker status records active and waiting counts for both stages and the current visual limit. No schema changes.
+- Synthetic checks passed for stage overlap, one claiming thread, bounded concurrency, adaptive scaling conditions, overlapping/disjoint file locks, deferred progress, and shared exact candidates. Python and JavaScript syntax and an isolated release build passed.
+- Narrow release passed preflight and deployed to `bens-pc`; backup: `C:\downloads\gallery\change-backups\github-release-20261106-122321`. The live worker and status files matched the release, app pool was Started, and worker task Running. The bounded follow-up still showed startup file recovery rather than matching; 32,686 match jobs were pending and six hash jobs failed. Live stage overlap, adaptive scaling, and throughput improvement remain unverified. No ongoing monitoring was started. The baseline checkpoint remains the local Git tag `gallery-before-parallel-mutation-workers-20261106` and host backup `worker-pool-baseline-20261106-115635`. Source changes are local and unpushed.
+
+## 2026-11-06 12:09 MST — Two-stage matching worker deployed after checkpoint
+
+- Before changes, tagged clean source commit `68faa917536cd5230490014b1301f55fb9bb8487` as local-only `gallery-before-parallel-mutation-workers-20261106`. Backed up the 500 deployed files under `C:\downloads\gallery\change-backups\worker-pool-baseline-20261106-115635` and verified every copied file hash. This checkpoint covers application files, not live MySQL or NAS data.
+- The coordinator alone claims up to 80 jobs (20 per mutation worker). Up to 10 independent database connections scan visual candidates and stage matches in memory. After the scan stage, up to four workers apply exact duplicate consolidation, visual match records, and file organization. Mutation workers acquire ordered striped locks covering their source file, exact candidate files, and the involved collections. Progress cursors advance only after staged visual matches are applied. Collection moves and recovery remain outside the pool and run under the coordinator's existing global lock. No schema changes.
+- Synthetic checks reached 10 visual comparisons and four disjoint mutation workers, serialized overlapping mutation sets, verified exact-candidate overlap locks, and confirmed that visual scans did not advance persistent progress before applying matches. Python syntax and an isolated release build passed.
+- Deployed a narrow release to `bens-pc` after preflight; backup: `C:\downloads\gallery\change-backups\github-release-20261106-120718`. The unchanged live DLL and DatabaseWorker.py were preserved. Immediate checks showed the app pool Started, the worker task Running, and the live worker/status files matching the release. The worker's startup recovery pass completed during the bounded follow-up; the matching queue still had 32,924 pending jobs and 6 failed hash jobs, with no leased jobs at that instant. Actual 10/4 production concurrency and throughput improvement remain unverified. No continued monitoring was started. Source changes are local and unpushed.
 
 ## 2026-11-06 11:41 MST — Status page sign-in return fixed
 
