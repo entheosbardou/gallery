@@ -29,6 +29,22 @@
 - Python and JavaScript syntax checks, an isolated release build, and synthetic tests for conveyor concurrency, index claims, and transient lock retries passed. On-host release validation passed. The live IIS app pool and worker task were running and deployed file hashes matched the release.
 - In a brief live pipeline sample before the final lock-retry revision, the status reported about 168 visual comparisons, 125 file-change completions, and 129 index updates per minute; the index queue held 4 changes. These are stage counts, not completed image jobs. At 14:53 MST, the final revision was still recovering 134 interrupted file operations (70 processed), with 0 failed image-match jobs and 2 index changes waiting. Sustained throughput after this recovery pass remains unverified.
 
+## 2026-11-06 14:13 MST — Initial media wait resolved
+
+- The user confirmed that the wait before media appears is resolved after the 14:09 MST deferred-count deployment. No new browser timing value was provided. The exact Saved count and metadata queries still run after entries are displayed; their database cost has not been reduced.
+- At this checkpoint, the work was on `fix/gallery-session-renewal`; the `main` worktree was not modified or deployed, and this branch had not been pushed.
+
+## 2026-11-06 13:40 MST — Direct page jump deployed
+
+- Both page controls now accept a page number and Enter. The API accepts `page` and uses a single offset query for that page under the existing collection/category access filters; cursor clients remain supported. Invalid or out-of-range page numbers are rejected.
+- Commit `3beb277` on `fix/gallery-session-renewal` passed JavaScript syntax, diff, and release build checks. A narrow release passed preflight and deployed to `bens-pc`; backup: `C:\downloads\gallery\change-backups\github-release-20261106-133947`. Live HTML, JavaScript, and DLL hashes matched the build. The app pool was Started and worker task Running immediately afterward.
+- Authenticated page 81 interaction and production query latency remain unverified. At this checkpoint, the branch was local and unpushed.
+
+## 2026-11-06 13:29 MST — Page controls deployed on session-renewal branch
+
+- Added matching Previous, page number, and Next controls before and after the media cards on `fix/gallery-session-renewal`. Both controls share the existing cursor navigation state. No API or schema change.
+- JavaScript syntax, diff checks, and release build passed in the isolated branch worktree. A narrow release passed preflight and deployed to `bens-pc`; backup: `C:\downloads\gallery\change-backups\github-release-20261106-132856`. The live HTML and JavaScript SHA256 hashes matched the branch files. The app pool was Started and worker task Running immediately afterward. Authenticated browser interaction remains unverified. At this checkpoint, the branch had not been pushed.
+
 ## 2026-11-05 12:09 -07:00 — Full recovery decision controls deployed
 
 - Duplicate issues expose keep-first, keep-second, keep-both and retry; moves expose finish-move and keep-original-location. Every issue also offers restoring a selected copy from its operation backup or locating a matching copy inside wallpaper storage. Technical details are collapsed. Queued decisions execute under the existing worker account/lock and show results beside the issue. Completed issues clear from the open panel automatically.
@@ -187,3 +203,13 @@ The original repository snapshot and later timestamped entries record evidence a
 1. Build the Windows Docker image on a Windows-container Docker engine and test it with nonproduction mounts.
 2. Run the GitHub build workflow, then configure the `gallery` runner and manually test the deployment workflow.
 3. Review unresolved file operations through the Gallery UI and confirm the downloader matching backlog when the user asks for a one-time status check.
+## 2026-11-06 13:50 MST — Initial inventory load deployed
+
+- On `fix/gallery-session-renewal`, Gallery now starts the initial inventory request without waiting for the download-status request. The page still requests and displays download status independently. Updated the Gallery script URL so browsers fetch the change.
+- JavaScript syntax, diff check, and release build passed. A narrow release with the two changed UI files and unchanged live server companions passed deployment preflight and deployed to `bens-pc`; backup: `C:\downloads\gallery\change-backups\github-release-20261106-134951`. Live UI hashes matched the branch files; IIS app pool was Started and database worker task Running immediately afterward. Authenticated browser timing and production inventory latency remain unverified. The branch is local and unpushed. The uncommitted changes on `main` were not touched or deployed.
+
+## 2026-11-06 14:09 MST — Saved results display before exact count
+
+- Live IIS logs showed `/api/inventory` taking roughly 12–15 seconds for `statuses=["saved"]` at 100 records per page. Read-only reproduction on the live database measured the Saved count at 11.2 seconds, while fetching the first 101 saved IDs took 0.04 seconds. The inventory metadata saved-file count took 7.8 seconds. These are observations, not authenticated browser timings.
+- On `fix/gallery-session-renewal`, `defer_count=1` lets the inventory API return entries without the slow exact count; a new access-controlled `GET /api/inventory-count` supplies the exact total afterward. The browser now renders entries first, waits 750 ms to prioritize images, then requests the count and metadata. Page navigation and access checks remain in place. No schema change.
+- JavaScript syntax, diff check, and release build passed. A narrow release containing only the compiled Gallery handler and the updated Gallery page/script passed preflight and deployed to `bens-pc`; backup: `C:\downloads\gallery\change-backups\github-release-20261106-140918`. Live file hashes matched the build; the app pool was Started and worker task Running immediately afterward. The `main` worktree and its uncommitted files were not touched or deployed. Updated authenticated first-media timing remains unverified. The branch is local and unpushed.
