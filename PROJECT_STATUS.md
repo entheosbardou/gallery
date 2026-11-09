@@ -219,3 +219,15 @@ The original repository snapshot and later timestamped entries record evidence a
 - Added an administrator-only Change category action for saved image entries. It queues the existing verified file-move worker to move the file into SFW, Sketchy, NSFW, or Not provided, then updates the entry category. The dialog reports move progress and errors and supports retrying a failed move.
 - The action currently requires exactly one saved file used by no other active entry. Shared files and entries with multiple linked files return a review message, avoiding an ambiguous access-category change.
 - No schema change or migration. An isolated release build passed, including C# compilation and Python syntax validation; JavaScript syntax and Git whitespace checks passed. This is source only: no deployment, live database mutation, or authenticated browser test was performed.
+
+## 2026-11-09 13:45 MST — Saved image category change deployed
+
+- Deployed the category-change source from the local worktree to the IIS installation on bens-pc using a narrowed release. The release was validated with Deploy-OnHost.ps1 -ValidateOnly before installation. The deployment script backed up replaced files to C:\downloads\gallery\change-backups\github-release-20261109-134503.
+- Immediate checks found matching hashes for the new worker, page, JavaScript, compiled Gallery handler, and changed C# source. The WallpaperGallery app pool was Started and the database worker task Running. An unauthenticated request to http://bens-pc.thelinclan.com:8791/ returned the expected 302 sign-in redirect.
+- No saved image was reclassified during verification. Authenticated dialog behavior, file relocation, external downloader path sync, and category access after a real move remain unverified live. The category-change source is in local commit `5f4c763`; the deployment-status note is uncommitted. No push was performed in this deployment.
+
+## 2026-11-09 13:56 MST — Bulk category action deployed
+
+- Added an administrator-only Change selected categories button beside bulk collection move. It queues the existing category-change operation for each eligible selected saved image, skips entries already in the target category, and reports entries that could not be queued. Non-image and unsaved selections are excluded from the eligible count.
+- JavaScript syntax, diff check, and an isolated release build passed. A narrow UI release passed `Deploy-OnHost.ps1 -ValidateOnly` and deployed to `bens-pc`; backup: `C:\downloads\gallery\change-backups\github-release-20261109-135601`.
+- Immediate checks found matching hashes for the deployed page and JavaScript. The app pool was Started, the database worker task Running, and an unauthenticated request returned the expected 302 sign-in redirect. Authenticated browser behavior and an actual bulk category move remain unverified live.
