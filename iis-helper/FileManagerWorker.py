@@ -564,7 +564,7 @@ def main(W,once=False):
     scanned=True
     W.import_documents(db,imports)
     if imports:W.state(db,'import_updates',{'requested':False})
-    if requested:F.execute(db,"UPDATE fm_work_items SET state='pending',failure_count=0,available_at=UTC_TIMESTAMP(6) WHERE state='failed'")
+    # Failed work requires an explicit per-job retry or reviewed manual decision.
     W.state(db,'worker_requested',{'requested':False})
    import CurrentLocations
    if scanned:CurrentLocations.housekeeping(db)

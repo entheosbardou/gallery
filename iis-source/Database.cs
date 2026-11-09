@@ -1,4 +1,4 @@
-using System;using System.IO;using System.Linq;using System.Text;using System.Collections;using System.Collections.Generic;using System.Configuration;using System.Security.Cryptography;using MySqlConnector;
+using System;using System.IO;using System.Linq;using System.Text;using System.Collections;using System.Collections.Generic;using System.Configuration;using System.Security.Cryptography;using System.Web;using MySqlConnector;
 public static partial class Gallery {
  public static bool DatabaseEnabled {get{return ConfigurationManager.AppSettings["DatabaseEnabled"]=="true";}}
  static string DatabaseConfig {get{return ConfigurationManager.AppSettings["DatabaseConfig"]??@"C:\downloads\gallery\iis-data\mysql.json";}}
@@ -122,7 +122,7 @@ public static partial class Gallery {
   else if(component=="downloads"){
    var rows=DBRows(db,null,"SELECT value FROM gallery_state WHERE state_key='download_queue' LIMIT 1");
    var item=rows.Count==0?new Dictionary<string,object>():Json.Deserialize<Dictionary<string,object>>(Text(rows[0],"value"));
-   data=new{phase=Text(item,"phase"),processed=Text(item,"processed"),total=item.ContainsKey("entries")?((IList)item["entries"]).Count:0,saved=Text(item,"saved"),failed=Text(item,"failed"),updated_utc=Text(item,"updated_utc"),errors=item.ContainsKey("errors")?((IList)item["errors"]).Cast<object>().Take(20).ToArray():new object[0]};
+   data=new{phase=Text(item,"phase"),processed=Text(item,"processed"),total=item.ContainsKey("entries")?((IList)item["entries"]).Count:0,saved=Text(item,"saved"),failed=Text(item,"failed"),updated_utc=Text(item,"updated_utc"),errors=item.ContainsKey("errors")?((IList)item["errors"]).Cast<object>().Take(20).ToArray():new object[0],failed_entries=item.ContainsKey("failed_entries")?((IList)item["failed_entries"]).Cast<object>().ToArray():new object[0]};
   }else if(component=="inventory")data=new{saved=DBRows(db,null,"SELECT COUNT(*) n FROM files WHERE is_present=TRUE AND canonical_file_id IS NULL")[0]["n"],records=DBRows(db,null,"SELECT COUNT(*) n FROM inventory_entries WHERE deleted_at IS NULL")[0]["n"],collections=DBRows(db,null,"SELECT COUNT(*) n FROM fm_collection_discovery WHERE is_marked=TRUE")[0]["n"]};
   else if(component=="services")data=new{wallhaven=WallhavenKeyAvailable(),reddit=RedditSessionAvailable()};
   else throw new GalleryError(400,"Choose a valid status component.");
@@ -143,6 +143,20 @@ public static partial class Gallery {
   var items=DBRows(db,null,"SELECT o.id,o.operation_kind,o.state,o.error,o.source_path,o.target_path,HEX(o.source_sha256) expected_source_sha256,HEX(o.target_sha256) expected_target_sha256,o.source_file_id,o.target_file_id,s.relative_path current_source_path,(SELECT c.collection_key FROM fm_file_catalog fc JOIN collections c ON c.id=fc.collection_id WHERE fc.id=o.source_file_id) source_collection,s.is_present source_catalog_present,s.canonical_file_id source_canonical_file_id,t.relative_path current_target_path,(SELECT c.collection_key FROM fm_file_catalog fc JOIN collections c ON c.id=fc.collection_id WHERE fc.id=o.target_file_id) target_collection,t.is_present target_catalog_present,t.canonical_file_id target_canonical_file_id,k.relative_path survivor_path,(SELECT c.collection_key FROM fm_file_catalog fc JOIN collections c ON c.id=fc.collection_id WHERE fc.id=k.id) survivor_collection,k.is_present survivor_catalog_present,(SELECT COUNT(*) FROM inventory_entries e WHERE e.file_id=o.source_file_id) source_entry_links,(SELECT COUNT(*) FROM fm_external_bindings b WHERE b.file_id=o.source_file_id) source_downloader_links FROM file_operations o LEFT JOIN files s ON s.id=o.source_file_id LEFT JOIN files t ON t.id=o.target_file_id LEFT JOIN files k ON k.id=s.canonical_file_id AND k.id=t.canonical_file_id WHERE o.state='error' AND (@id=0 OR o.id=@id) ORDER BY CASE WHEN o.error IN ('Missing source has different bytes; recovery needs review','Downloader MD5 differs from the actual file; original retained') THEN 0 ELSE 1 END,o.id LIMIT 50","@id",id);
   return new{total=total,items=items};
  }}
+ public static object DatabaseWithdrawFailedMove(HttpContext context,Dictionary<string,object> payload){
+  long id;if(!Int64.TryParse(Text(payload,"id"),out id)||id<1)throw new GalleryError(400,"Choose a failed move.");
+  using(var db=OpenDatabase())using(var tx=db.BeginTransaction()){
+   var rows=DBRows(db,tx,"SELECT id,state,entry_id,target_collection_id,error FROM fm_collection_moves WHERE id=@id FOR UPDATE","@id",id);
+   if(rows.Count!=1||Text(rows[0],"state")!="failed")throw new GalleryError(409,"This move is no longer failed. Refresh its status.");
+   var files=DBRows(db,tx,"SELECT file_id,state,operation_id FROM fm_collection_move_files WHERE move_id=@id FOR UPDATE","@id",id);
+   if(files.Any(f=>Text(f,"state")!="pending"||f["operation_id"]!=null))throw new GalleryError(409,"This move already started changing files. Review its file operations or retry finishing it.");
+   DBExec(db,tx,"INSERT INTO gallery_state(state_key,value) VALUES(@key,@value) ON DUPLICATE KEY UPDATE value=VALUES(value)","@key","manual_withdrawn_move:"+id,"@value",Json.Serialize(new{move_id=id,entry_id=rows[0]["entry_id"],target_collection_id=rows[0]["target_collection_id"],error=rows[0]["error"],actor=context.User.Identity.Name,withdrawn_utc=DateTime.UtcNow.ToString("o")}));
+   DBExec(db,tx,"DELETE FROM fm_collection_move_files WHERE move_id=@id","@id",id);
+   DBExec(db,tx,"DELETE FROM gallery_state WHERE state_key=@key","@key","category_move:"+id);
+   DBExec(db,tx,"DELETE FROM fm_collection_moves WHERE id=@id AND state='failed'","@id",id);
+   tx.Commit();return new{message="The unstarted failed move was withdrawn. No file or category was changed."};
+  }
+ }
  public static object DatabaseRecoveryAction(Dictionary<string,object> payload){
   long id;if(!Int64.TryParse(Text(payload,"id"),out id)||id<1)throw new GalleryError(400,"Choose an issue.");
   string choice=Text(payload,"choice");if(!new[]{"first","second","both","cancel_move","retry","restore","locate"}.Contains(choice))throw new GalleryError(400,"Choose a resolution.");
@@ -182,7 +196,7 @@ public static partial class Gallery {
   using(var db=OpenDatabase())using(var tx=db.BeginTransaction()){
    var found=DBRows(db,tx,"SELECT o.id,o.operation_kind,o.state,o.source_path,o.target_path,HEX(o.source_sha256) source_sha,HEX(o.target_sha256) target_sha,o.source_file_id,o.target_file_id,s.relative_path current_source,s.is_present source_present,s.canonical_file_id source_canonical,t.relative_path current_target,t.is_present target_present,t.canonical_file_id target_canonical FROM file_operations o JOIN files s ON s.id=o.source_file_id JOIN files t ON t.id=o.target_file_id WHERE o.id=@id FOR UPDATE","@id",id);
    if(found.Count!=1)throw new GalleryError(404,"Operation not found.");var op=found[0];
-   if(Text(op,"state")!="error"||Text(op,"operation_kind")!="deduplicate"||Convert.ToInt64(op["source_file_id"])==Convert.ToInt64(op["target_file_id"])||Text(op,"source_canonical")!=""||Text(op,"target_canonical")!=""||!Convert.ToBoolean(op["source_present"])||!Convert.ToBoolean(op["target_present"])||Text(op,"current_source")!=Text(op,"source_path")||Text(op,"current_target")!=Text(op,"target_path"))throw new GalleryError(409,"This operation cannot safely keep both files. Retry or review its current links.");
+   if(Text(op,"state")!="error"||Text(op,"operation_kind")!="deduplicate"||Text(op,"source_sha")==Text(op,"target_sha")||Convert.ToInt64(op["source_file_id"])==Convert.ToInt64(op["target_file_id"])||Text(op,"source_canonical")!=""||Text(op,"target_canonical")!=""||!Convert.ToBoolean(op["source_present"])||!Convert.ToBoolean(op["target_present"])||Text(op,"current_source")!=Text(op,"source_path")||Text(op,"current_target")!=Text(op,"target_path"))throw new GalleryError(409,"This operation cannot safely keep both files. Retry or review its current links.");
    foreach(var side in new[]{"source","target"}){
     string relative=Text(op,side+"_path"),expected=Text(op,side+"_sha").ToLowerInvariant();
     string path=RecoveryReviewPath(Root,relative);

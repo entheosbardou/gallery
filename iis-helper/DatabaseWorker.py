@@ -329,6 +329,32 @@ def backup_folder(operation_id,byte_size):
  root.mkdir(parents=True,exist_ok=True)
  if shutil.disk_usage(root).free<byte_size+1024*1024*1024:raise OSError('Backup storage is nearly full; original file retained')
  folder=root/str(operation_id);folder.mkdir(parents=True,exist_ok=True);return folder
+
+def retire_duplicate_backups(db,source_id,target_id,source_digest,target_digest):
+ """Remove old duplicate backups only after one verified library copy and all links survive."""
+ ops=q(db,"SELECT id,state,source_path,target_path,source_sha256,target_sha256 FROM file_operations WHERE operation_kind='deduplicate' AND source_file_id=%s AND target_file_id=%s",(source_id,target_id))
+ if not ops or any(o['state'] not in ('complete','cancelled') or bytes(o['source_sha256'])!=source_digest or bytes(o['target_sha256'])!=target_digest for o in ops):return
+ source=q(db,'SELECT canonical_file_id,is_present FROM files WHERE id=%s',(source_id,))
+ target=q(db,'SELECT relative_path,is_present,canonical_file_id FROM files WHERE id=%s',(target_id,))
+ if not source or source[0]['canonical_file_id']!=target_id or source[0]['is_present']:return
+ if not target or not target[0]['is_present'] or target[0]['canonical_file_id'] or not target[0]['relative_path']:return
+ if q(db,'SELECT id FROM inventory_entries WHERE file_id=%s LIMIT 1',(source_id,)) or q(db,'SELECT file_id FROM fm_external_bindings WHERE file_id=%s LIMIT 1',(source_id,)):return
+ source_paths={o['source_path'] for o in ops if o['source_path']}
+ target_paths={o['target_path'] for o in ops if o['target_path']}
+ if any(safe(path).exists() for path in source_paths):return
+ target_paths.add(target[0]['relative_path'])
+ if not any(safe(path).is_file() and filehash(safe(path))==target_digest for path in target_paths):return
+ settings=ET.parse(BASE/'iis-site/web.config').getroot().find('appSettings')
+ configured=next((item.get('value') for item in settings if item.get('key')=='GalleryBackupRoot'),None)
+ root=Path(configured) if configured else BASE/'change-backups/mysql-dedupe'
+ if not root.is_dir() or root.is_symlink():return
+ for op in ops:
+  folder=root/str(op['id'])
+  if not folder.is_dir() or folder.is_symlink():continue
+  files=list(folder.iterdir())
+  if any(not f.is_file() or f.is_symlink() or filehash(f)!=source_digest for f in files):continue
+  for f in files:f.unlink()
+  folder.rmdir()
 def nearest_collection(relative,active):
  path=relative.replace('\\','/').casefold()
  return next((key for key in sorted(active,key=len,reverse=True) if key=='.' or path.startswith(key.casefold()+'/')),None)
@@ -610,6 +636,9 @@ def consolidate(db,groups):
   keeper=max(group,key=lambda f:(f['id'] in pinned,f['id'] in overrides,scores[f['id']],-f['id']));kp=safe(keeper['relative_path'])
   for f in group:
    if f is keeper:continue
+   # A failed cleanup already owns this exact pair. Recovery will resume it;
+   # do not create another identical error each time matching runs.
+   if q(db,"SELECT id FROM file_operations WHERE operation_kind='deduplicate' AND source_file_id=%s AND target_file_id=%s AND source_sha256=%s AND target_sha256=%s AND state IN ('planned','copied','linked','error') LIMIT 1",(f['id'],keeper['id'],f['file_sha256'],keeper['file_sha256'])):continue
    allowed,reason=FMW.can_relocate(db,f['id'],keeper['relative_path'])
    if not allowed:
     run(db,'INSERT INTO fm_deferred_files(file_id,reason) VALUES(%s,%s) ON DUPLICATE KEY UPDATE reason=VALUES(reason)',(f['id'],reason));continue
@@ -617,10 +646,6 @@ def consolidate(db,groups):
    try:
     with protected(kp) as kept,protected(safe(f['relative_path']),True) as duplicate:
      if hashstream(kept)!=keeper['file_sha256'] or hashstream(duplicate)!=f['file_sha256']:raise RuntimeError('File changed after hash comparison')
-     backup=backup_folder(op,f['bytes']);saved=backup/Path(f['relative_path']).name
-     with saved.open('xb') as dest:shutil.copyfileobj(duplicate,dest)
-     if filehash(saved)!=f['file_sha256']:raise RuntimeError('Duplicate backup verification failed; original retained')
-     duplicate.seek(0)
      # The DB and every raw reference are committed before removing the old file.
      rewrite_path(db,f,keeper,source_stream=duplicate,target_stream=kept)
      run(db,'UPDATE files SET canonical_file_id=%s WHERE canonical_file_id=%s',(keeper['id'],f['id']));run(db,'UPDATE files SET canonical_file_id=%s,is_present=FALSE WHERE id=%s',(keeper['id'],f['id']))
@@ -697,6 +722,22 @@ def recovery_file(db,file_id,recorded_path,expected):
   rows=q(db,'SELECT f.*,c.collection_key AS owner FROM fm_file_catalog f JOIN collections c ON c.id=f.collection_id WHERE f.id=%s',(f['canonical_file_id'],))
  return None
 
+def close_superseded_duplicate(db,op):
+ """Close an old dedupe plan after both IDs already resolve to one verified copy."""
+ if op['operation_kind']!='deduplicate' or bytes(op['source_sha256'])!=bytes(op['target_sha256']):return False
+ files=q(db,'SELECT id,canonical_file_id FROM files WHERE id IN (%s,%s)',(op['source_file_id'],op['target_file_id']))
+ if len(files)!=2 or not files[0]['canonical_file_id'] or files[0]['canonical_file_id']!=files[1]['canonical_file_id']:return False
+ survivor=q(db,'SELECT relative_path,is_present,canonical_file_id FROM files WHERE id=%s',(files[0]['canonical_file_id'],))
+ if len(survivor)!=1 or not survivor[0]['is_present'] or survivor[0]['canonical_file_id']:return False
+ if q(db,'SELECT id FROM inventory_entries WHERE file_id IN (%s,%s) LIMIT 1',(op['source_file_id'],op['target_file_id'])):return False
+ if q(db,'SELECT file_id FROM fm_external_bindings WHERE file_id IN (%s,%s) LIMIT 1',(op['source_file_id'],op['target_file_id'])):return False
+ for old in (op['source_path'],op['target_path']):
+  if safe(old).exists():return False
+ saved=safe(survivor[0]['relative_path'])
+ if not saved.is_file() or filehash(saved)!=bytes(op['source_sha256']):return False
+ run(db,"UPDATE file_operations SET state='cancelled',error='Superseded by verified surviving duplicate',completed_at=UTC_TIMESTAMP(6) WHERE id=%s AND state IN ('planned','copied','linked','error')",(op['id'],))
+ return True
+
 def recover(db,operation_id=None):
  require_root()
  ops=q(db,"SELECT * FROM file_operations WHERE state IN ('planned','copied','linked','error')"+(" AND id=%s" if operation_id is not None else "")+" ORDER BY id",(operation_id,) if operation_id is not None else ())
@@ -713,6 +754,7 @@ def recover(db,operation_id=None):
   if op['state']=='error' and (op['error'] or '').startswith('On hold: '):continue
   try:
    if q(db,'SELECT move_id FROM fm_collection_move_files WHERE operation_id=%s LIMIT 1',(op['id'],)):continue
+   if close_superseded_duplicate(db,op):continue
    if not FMW.can_manage(db,op['source_path'])[0]:continue
    if not FMW.can_relocate(db,op['source_file_id'],op['target_path'])[0]:continue
    if op['operation_kind']=='organize':
@@ -761,13 +803,6 @@ def recover(db,operation_id=None):
     if source:
      with protected(source,True) as original:
       if hashstream(original)!=bytes(op['source_sha256']):raise RuntimeError('Recovery original changed')
-      if op['operation_kind']=='deduplicate':
-       backup=backup_folder(op['id'],source.stat().st_size);saved=backup/source.name
-       if saved.exists() and filehash(saved)!=bytes(op['source_sha256']):saved=backup/(str(source_row['id'])+'-'+source.name)
-       if not saved.exists():
-        with saved.open('xb') as dest:shutil.copyfileobj(original,dest)
-        original.seek(0)
-       if filehash(saved)!=bytes(op['source_sha256']):raise RuntimeError('Recovery backup does not match original')
       try:link(original,kept)
       except RuntimeError as error:
        if 'Downloader MD5 differs from the actual file' not in str(error):raise
@@ -812,6 +847,9 @@ def recover(db,operation_id=None):
    print('Recovery operation '+str(op['id'])+': '+traceback.format_exc(),flush=True)
    if op['error']!=message:review+=1
    if len(review_issues)<10:review_issues.append({'file':op['source_path'],'error':'Operation '+str(op['id'])+': '+message})
+ for source_id,target_id,source_digest,target_digest in {(op['source_file_id'],op['target_file_id'],bytes(op['source_sha256']),bytes(op['target_sha256'])) for op in ops if op['operation_kind']=='deduplicate'}:
+  try:retire_duplicate_backups(db,source_id,target_id,source_digest,target_digest)
+  except Exception as error:print('Duplicate backup cleanup '+str(source_id)+' -> '+str(target_id)+': '+str(error),flush=True)
  if total:progress(db,'File recovery pass complete',total,total,recovery_processed=total,recovery_total=total,recovery_review=review,issues=review_issues)
 
 def cycle(db):

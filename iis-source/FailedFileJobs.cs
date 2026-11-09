@@ -39,15 +39,30 @@ public static partial class Gallery {
   record["database_name"]=schema;return record;
  }
  static string FailedJobPreview(Dictionary<string,object> job){string owner=Text(job,"collection_key"),path=Text(job,"relative_path");string name=owner=="."?path:path.Substring(owner.Length+1);return MediaUrl(new Collection{Id=owner},name);}
+ static Dictionary<string,object> DuplicateDownloaderFile(MySqlConnection db,MySqlTransaction tx,string schema,object sha,object oldId,bool locked){
+  var rows=DBRows(db,tx,"SELECT id,md5,sha256,size_bytes FROM `"+schema+"`.files WHERE sha256=@sha AND id<>@old"+(locked?" FOR UPDATE":""),"@sha",sha,"@old",oldId);
+  return rows.Count==0?null:rows[0];
+ }
+ static void VerifyDuplicateDownloaderFile(MySqlConnection db,MySqlTransaction tx,string schema,Dictionary<string,object> owner,Dictionary<string,object> proof){
+  if(Text(owner,"sha256")!=Text(proof,"sha256")||Text(owner,"md5")!=Text(proof,"md5")||Text(owner,"size_bytes")!=Text(proof,"size"))throw new GalleryError(409,"The other downloader file record does not match the reviewed bytes. Review both records before merging.");
+  var locations=DBRows(db,tx,"SELECT id,relative_path FROM `"+schema+"`.file_locations WHERE file_id=@id AND status='present' ORDER BY id FOR UPDATE","@id",owner["id"]);
+  if(locations.Count==0)throw new GalleryError(409,"The other downloader file has no present copy to verify.");
+  foreach(var location in locations){
+   string path=RecoveryReviewPath(Root,Text(location,"relative_path"));if(!File.Exists(path))throw new GalleryError(409,"A linked duplicate file is missing. Recheck its location.");
+   using(var stream=new FileStream(path,FileMode.Open,FileAccess.Read,FileShare.Read)){
+    if(stream.Length!=Convert.ToInt64(proof["size"])||HashStream(stream)!=Text(proof,"sha256"))throw new GalleryError(409,"The other downloader file does not have the same bytes. No links were merged.");
+   }
+  }
+ }
  public static object DatabaseReviewFailedFileJob(string requestedId){
   long id=FailedJobId(requestedId);using(var db=OpenDatabase()){
    var job=FailedJob(db,null,id,false);string kind=Text(job,"task_kind"),error=Text(job,"error");
    string choice=kind=="hash_file"&&error.IndexOf("image file is truncated",StringComparison.OrdinalIgnoreCase)>=0?"accept_partial":kind=="match_file"&&error.IndexOf("Downloader MD5 differs",StringComparison.OrdinalIgnoreCase)>=0?"correct_checksum":"";
-   if(choice=="")throw new GalleryError(409,"This failure has no manual resolution yet. You can retry it after correcting its cause.");
+   if(choice=="")choice="close_after_manual_handling";
    string path=RecoveryReviewPath(Root,Text(job,"relative_path"));if(!File.Exists(path))throw new GalleryError(409,"The saved file is missing. Recheck the collection.");
    using(var stream=new FileStream(path,FileMode.Open,FileAccess.Read,FileShare.Read)){
-    var proof=FileProof(job,stream);Dictionary<string,object> record=null;if(choice=="correct_checksum")record=DownloaderRecord(db,null,job,false);
-    return new{job_id=id,choice=choice,file=job["relative_path"],preview_url=FailedJobPreview(job),actual_sha256=proof["sha256"],actual_md5=proof["md5"],byte_size=proof["size"],recorded_md5=record==null?null:record["md5"],recorded_sha256=record==null?null:record["sha256"],recorded_size=record==null?null:record["size_bytes"],media_links=record==null?null:record["media_links"],external_file_id=record==null?null:record["external_file_id"]};
+    var proof=FileProof(job,stream);Dictionary<string,object> record=null,duplicate=null;if(choice=="correct_checksum"){record=DownloaderRecord(db,null,job,false);duplicate=DuplicateDownloaderFile(db,null,Text(record,"database_name"),proof["sha256"],record["external_file_id"],false);}
+    return new{job_id=id,choice=choice,file=job["relative_path"],preview_url=FailedJobPreview(job),actual_sha256=proof["sha256"],actual_md5=proof["md5"],byte_size=proof["size"],recorded_md5=record==null?null:record["md5"],recorded_sha256=record==null?null:record["sha256"],recorded_size=record==null?null:record["size_bytes"],media_links=record==null?null:record["media_links"],external_file_id=record==null?null:record["external_file_id"],duplicate_of_file_id=duplicate==null?null:duplicate["id"],duplicate_recorded_md5=duplicate==null?null:duplicate["md5"],duplicate_recorded_size=duplicate==null?null:duplicate["size_bytes"]};
    }
   }
  }
@@ -60,16 +75,46 @@ public static partial class Gallery {
     var proof=FileProof(initial,stream);if(Text(proof,"sha256")!=expectedSha)throw new GalleryError(409,"The file bytes changed since review. Review it again.");
     using(var tx=db.BeginTransaction()){
      var job=FailedJob(db,tx,id,true);if(Text(job,"relative_path")!=Text(initial,"relative_path")||Text(job,"expected_size")!=Text(initial,"expected_size")||Text(job,"expected_ticks")!=Text(initial,"expected_ticks"))throw new GalleryError(409,"The job changed since review. Review it again.");
+     bool mergedDuplicate=false;
      if(choice=="accept_partial"&&Text(job,"task_kind")=="hash_file"&&Text(job,"error").IndexOf("image file is truncated",StringComparison.OrdinalIgnoreCase)>=0){
       DBExec(db,tx,"INSERT INTO gallery_state(state_key,value) VALUES(@key,@value) ON DUPLICATE KEY UPDATE value=VALUES(value)","@key","manual_truncated:"+Text(job,"file_id"),"@value",Json.Serialize(new{sha256=proof["sha256"],bytes=proof["size"],ticks=proof["ticks"],actor=context.User.Identity.Name,accepted_utc=DateTime.UtcNow.ToString("o")}));
      }else if(choice=="correct_checksum"&&Text(job,"task_kind")=="match_file"&&Text(job,"error").IndexOf("Downloader MD5 differs",StringComparison.OrdinalIgnoreCase)>=0){
       var record=DownloaderRecord(db,tx,job,true);if(Text(record,"md5")!=Text(payload,"recorded_md5")||Text(record,"sha256")!=Text(payload,"recorded_sha256")||Text(record,"size_bytes")!=Text(payload,"recorded_size"))throw new GalleryError(409,"The downloader record changed since review. Review it again.");
-      string schema=Text(record,"database_name");if(DBRows(db,tx,"SELECT id FROM `"+schema+"`.files WHERE sha256=@sha AND id<>@id LIMIT 1","@sha",proof["sha256"],"@id",record["external_file_id"]).Count>0)throw new GalleryError(409,"Another downloader file already owns this checksum. Review its links before correcting this record.");
-      DBExec(db,tx,"UPDATE `"+schema+"`.files SET md5=@md5,sha256=@sha,size_bytes=@size,verified_at=UTC_TIMESTAMP(6) WHERE id=@id","@md5",proof["md5"],"@sha",proof["sha256"],"@size",proof["size"],"@id",record["external_file_id"]);
-      DBExec(db,tx,"INSERT INTO gallery_state(state_key,value) VALUES(@key,@value) ON DUPLICATE KEY UPDATE value=VALUES(value)","@key","manual_checksum:"+id,"@value",Json.Serialize(new{file_id=job["file_id"],external_file_id=record["external_file_id"],previous_md5=record["md5"],verified_md5=proof["md5"],verified_sha256=proof["sha256"],actor=context.User.Identity.Name,accepted_utc=DateTime.UtcNow.ToString("o")}));
+      string schema=Text(record,"database_name");var duplicate=DuplicateDownloaderFile(db,tx,schema,proof["sha256"],record["external_file_id"],true);
+      if(Text(payload,"duplicate_of_file_id")!=(duplicate==null?"":Text(duplicate,"id")))throw new GalleryError(409,"The matching downloader record changed since review. Review it again.");
+      if(duplicate==null)DBExec(db,tx,"UPDATE `"+schema+"`.files SET md5=@md5,sha256=@sha,size_bytes=@size,verified_at=UTC_TIMESTAMP(6) WHERE id=@id","@md5",proof["md5"],"@sha",proof["sha256"],"@size",proof["size"],"@id",record["external_file_id"]);
+      else{
+       VerifyDuplicateDownloaderFile(db,tx,schema,duplicate,proof);
+       DBExec(db,tx,"INSERT IGNORE INTO `"+schema+"`.media_files(media_id,file_id) SELECT media_id,@target FROM `"+schema+"`.media_files WHERE file_id=@old","@target",duplicate["id"],"@old",record["external_file_id"]);
+       DBExec(db,tx,"UPDATE `"+schema+"`.file_locations SET file_id=@target,last_checked_at=UTC_TIMESTAMP(6) WHERE id=@location AND file_id=@old","@target",duplicate["id"],"@location",record["location_id"],"@old",record["external_file_id"]);
+       DBExec(db,tx,"DELETE FROM `"+schema+"`.media_files WHERE file_id=@old","@old",record["external_file_id"]);
+       if(DBRows(db,tx,"SELECT id FROM `"+schema+"`.file_locations WHERE file_id=@old LIMIT 1","@old",record["external_file_id"]).Count>0)throw new GalleryError(409,"The old downloader record has another location. No links were merged.");
+       DBExec(db,tx,"DELETE FROM `"+schema+"`.files WHERE id=@old","@old",record["external_file_id"]);
+       mergedDuplicate=true;
+      }
+      DBExec(db,tx,"INSERT INTO gallery_state(state_key,value) VALUES(@key,@value) ON DUPLICATE KEY UPDATE value=VALUES(value)","@key","manual_checksum:"+id,"@value",Json.Serialize(new{file_id=job["file_id"],external_file_id=record["external_file_id"],duplicate_of_file_id=duplicate==null?null:duplicate["id"],previous_md5=record["md5"],verified_md5=proof["md5"],verified_sha256=proof["sha256"],actor=context.User.Identity.Name,accepted_utc=DateTime.UtcNow.ToString("o")}));
+      if(mergedDuplicate)DBExec(db,tx,"INSERT INTO gallery_state(state_key,value) VALUES('worker_requested',@value) ON DUPLICATE KEY UPDATE value=VALUES(value)","@value",Json.Serialize(new{requested=true}));
      }else throw new GalleryError(409,"This job no longer supports that manual decision. Review it again.");
      DBExec(db,tx,"UPDATE fm_work_items SET state='pending',failure_count=0,available_at=UTC_TIMESTAMP(6),lease_owner=NULL,lease_token=NULL,lease_expires_at=NULL,error=NULL WHERE id=@id AND state='failed'","@id",id);
-     tx.Commit();return new{job_id=id,state="pending",resolution=choice};
+     tx.Commit();return new{job_id=id,state="pending",resolution=choice,message=mergedDuplicate?"Verified duplicate records merged. The worker is removing the extra copy without keeping a duplicate backup, then will close the related recovery issues.":"Manual decision saved. The file job was queued."};
+    }
+   }
+  }
+ }
+
+ public static object DatabaseCloseReviewedFileJob(HttpContext context,Dictionary<string,object> payload){
+  long id=FailedJobId(Text(payload,"id"));string expectedSha=Text(payload,"sha256").ToLowerInvariant();
+  if(!Regex.IsMatch(expectedSha,"^[0-9a-f]{64}$"))throw new GalleryError(400,"Review the current file before closing its failed job.");
+  using(var db=OpenDatabase()){
+   var initial=FailedJob(db,null,id,false);string path=RecoveryReviewPath(Root,Text(initial,"relative_path"));
+   using(var stream=new FileStream(path,FileMode.Open,FileAccess.Read,FileShare.Read)){
+    var proof=FileProof(initial,stream);if(Text(proof,"sha256")!=expectedSha)throw new GalleryError(409,"The file changed since review. Review it again.");
+    using(var tx=db.BeginTransaction()){
+     var job=FailedJob(db,tx,id,true);
+     if(Text(job,"relative_path")!=Text(initial,"relative_path")||Text(job,"expected_size")!=Text(initial,"expected_size")||Text(job,"expected_ticks")!=Text(initial,"expected_ticks")||Text(job,"error")!=Text(initial,"error"))throw new GalleryError(409,"The failed job changed since review. Review it again.");
+     DBExec(db,tx,"INSERT INTO gallery_state(state_key,value) VALUES(@key,@value) ON DUPLICATE KEY UPDATE value=VALUES(value)","@key","manual_file_job:"+id,"@value",Json.Serialize(new{decision="close_after_manual_handling",task_kind=job["task_kind"],file_id=job["file_id"],sha256=proof["sha256"],bytes=proof["size"],ticks=proof["ticks"],error=job["error"],actor=context.User.Identity.Name,accepted_utc=DateTime.UtcNow.ToString("o")}));
+     DBExec(db,tx,"UPDATE fm_work_items SET state='cancelled',lease_owner=NULL,lease_token=NULL,lease_expires_at=NULL WHERE id=@id AND state='failed'","@id",id);
+     tx.Commit();return new{job_id=id,state="cancelled",message="The reviewed job was closed. The saved file was retained; this processing stage was not completed."};
     }
    }
   }

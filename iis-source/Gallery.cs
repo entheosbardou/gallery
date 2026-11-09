@@ -80,14 +80,17 @@ public class GalleryHandler : IHttpHandler {
             if(route=="download") { Reply(c,200,Gallery.Download(payload)); return; }
             if(route=="delete-entry") { Reply(c,200,Gallery.DeleteEntry(payload)); return; }
             if(route=="move-entry") {Reply(c,202,Gallery.DatabaseMoveEntry(payload));return;}
+            if(route=="withdraw-failed-move") {if(!GalleryAuth.IsAdmin(c))throw new GalleryError(403,"Only administrators can withdraw failed moves.");Reply(c,200,Gallery.DatabaseWithdrawFailedMove(c,payload));return;}
             if(route=="retry-failed-file-job") {if(!GalleryAuth.IsAdmin(c))throw new GalleryError(403,"Only administrators can retry file jobs.");Reply(c,202,Gallery.DatabaseRetryFailedFileJob(payload));return;}
             if(route=="resolve-failed-file-job") {if(!GalleryAuth.IsAdmin(c))throw new GalleryError(403,"Only administrators can resolve file jobs.");Reply(c,202,Gallery.DatabaseResolveFailedFileJob(c,payload));return;}
+            if(route=="close-reviewed-file-job") {if(!GalleryAuth.IsAdmin(c))throw new GalleryError(403,"Only administrators can close reviewed file jobs.");Reply(c,200,Gallery.DatabaseCloseReviewedFileJob(c,payload));return;}
             if(route=="change-category") {Reply(c,202,Gallery.DatabaseChangeCategory(payload));return;}
             if(route=="set-tags") { Reply(c,200,Gallery.DatabaseSetTags(payload));return; }
             if(route=="downloads-filtered") { Reply(c,202,Gallery.EnqueueFilteredDownloads(c));return;}
             if(route=="downloads") { Reply(c,202,Gallery.EnqueueDownloads(payload)); return; }
             if(route=="download-stop") { Reply(c,200,Gallery.StopDownloadQueue()); return; }
             if(route=="download-resume") { Reply(c,200,Gallery.ResumeDownloadQueue()); return; }
+            if(route=="resolve-download-failure") {if(!GalleryAuth.IsAdmin(c))throw new GalleryError(403,"Only administrators can resolve failed downloads.");Reply(c,200,Gallery.ResolveDownloadFailure(c,payload));return;}
             if(route=="reddit-post") { Reply(c,200,Gallery.ResolveRedditPost(payload)); return; }
             if(route=="wallhaven") { Reply(c,200,Gallery.Wallhaven(Gallery.Text(payload,"id"),Gallery.Text(payload,"key"))); return; }
             if(route=="preview") { Reply(c,200,Gallery.SourcePreview(payload)); return; }

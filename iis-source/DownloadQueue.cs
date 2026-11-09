@@ -6,15 +6,20 @@ using System.Collections;
 using System.Collections.Generic;
 using System.Configuration;
 using System.Threading;
+using System.Web;
 using System.Web.Hosting;
 
 public class GalleryQueueItem {
     public string collection,site,id,kind,url,entry_id;
 }
+public class GalleryDownloadFailure {
+    public string id,error,entry_id,collection,site,source_id,kind,resolved_utc,actor;
+}
 public class GalleryDownloadJob {
     public string id,phase,current,updated_utc;
     public List<GalleryQueueItem> entries=new List<GalleryQueueItem>();
     public List<string> errors=new List<string>();
+    public List<GalleryDownloadFailure> failed_entries=new List<GalleryDownloadFailure>();
     public int processed,saved,existing,skipped,failed,resolved;
     public bool stop;
     public bool post_or_album_recovered;
@@ -36,6 +41,7 @@ public static partial class Gallery {
         if(DownloadJob!=null)return;
         if(DatabaseEnabled){var value=DatabaseState("download_queue");if(value!=null)DownloadJob=Json.Deserialize<GalleryDownloadJob>(Json.Serialize(value));}
         else if(File.Exists(QueuePath))DownloadJob=Json.Deserialize<GalleryDownloadJob>(File.ReadAllText(QueuePath));
+        if(DownloadJob!=null&&DownloadJob.failed_entries==null)DownloadJob.failed_entries=new List<GalleryDownloadFailure>();
         // Recover only batches whose entire processed prefix was silently unsupported.
         if(DownloadJob!=null&&!DownloadJob.post_or_album_recovered) {
             DownloadJob.post_or_album_recovered=true;
@@ -54,7 +60,7 @@ public static partial class Gallery {
     }
     static object QueueSummary() {
         if(DownloadJob==null)return new {phase="idle"};
-        return new {id=DownloadJob.id,phase=DownloadJob.phase,total=DownloadJob.entries.Count,processed=DownloadJob.processed,saved=DownloadJob.saved,existing=DownloadJob.existing,skipped=DownloadJob.skipped,failed=DownloadJob.failed,resolved=DownloadJob.resolved,current=DownloadJob.current,stop=DownloadJob.stop,errors=DownloadJob.errors.ToArray(),updated_utc=DownloadJob.updated_utc};
+        return new {id=DownloadJob.id,phase=DownloadJob.phase,total=DownloadJob.entries.Count,processed=DownloadJob.processed,saved=DownloadJob.saved,existing=DownloadJob.existing,skipped=DownloadJob.skipped,failed=DownloadJob.failed,resolved=DownloadJob.resolved,current=DownloadJob.current,stop=DownloadJob.stop,errors=DownloadJob.errors.ToArray(),failed_entries=(DownloadJob.failed_entries??new List<GalleryDownloadFailure>()).ToArray(),updated_utc=DownloadJob.updated_utc};
     }
     public static void EnsureDownloadWorker() {
         lock(QueueSync) {
@@ -86,12 +92,28 @@ public static partial class Gallery {
                 }
             }
             if(entries.Count==0)throw new GalleryError(400,"No entries selected.");
-            DownloadJob=new GalleryDownloadJob {id=Guid.NewGuid().ToString("N"),phase="queued",entries=entries};SaveQueue();
+            var unresolved=DownloadJob==null?new List<GalleryDownloadFailure>():((DownloadJob.failed_entries??new List<GalleryDownloadFailure>()).Where(x=>x.resolved_utc==null).ToList());
+            DownloadJob=new GalleryDownloadJob {id=Guid.NewGuid().ToString("N"),phase="queued",entries=entries,failed_entries=unresolved};SaveQueue();
             EnsureDownloadWorker();return QueueSummary();
         }
     }
     public static object StopDownloadQueue() {lock(QueueSync){LoadQueue();if(DownloadJob!=null&&new[]{"queued","running"}.Contains(DownloadJob.phase)){DownloadJob.stop=true;SaveQueue();}return QueueSummary();}}
     public static object ResumeDownloadQueue() {lock(QueueSync){LoadQueue();if(DownloadJob!=null&&DownloadJob.phase=="stopped"){DownloadJob.stop=false;DownloadJob.phase="queued";SaveQueue();EnsureDownloadWorker();}return QueueSummary();}}
+    public static object ResolveDownloadFailure(HttpContext context,Dictionary<string,object> payload) {
+        if(!DatabaseEnabled)throw new GalleryError(409,"Manual download review requires the database-backed gallery.");
+        lock(QueueSync){
+            LoadQueue();if(DownloadJob==null||new[]{"queued","running"}.Contains(DownloadJob.phase))throw new GalleryError(409,"Wait for the active download batch to finish before reviewing a failed item.");
+            string id=Text(payload,"id");var failure=(DownloadJob.failed_entries??new List<GalleryDownloadFailure>()).FirstOrDefault(x=>x.id==id);
+            if(failure==null||failure.resolved_utc!=null)throw new GalleryError(409,"This failed download is no longer open. Refresh the queue.");
+            long entryId;if(!Int64.TryParse(failure.entry_id,out entryId))throw new GalleryError(409,"This old download has no linked entry to verify. Review it in Gallery.");
+            using(var db=OpenDatabase()){
+                var rows=DBRows(db,null,"SELECT e.id,e.site,e.source_id,e.record_type,e.deleted_at,COUNT(DISTINCT f.id) saved_files FROM inventory_entries e LEFT JOIN fm_entry_file_projection l ON l.entry_id=e.id LEFT JOIN fm_file_catalog f ON f.id=l.file_id AND f.is_present=TRUE WHERE e.id=@id GROUP BY e.id,e.site,e.source_id,e.record_type,e.deleted_at","@id",entryId);
+                if(rows.Count!=1||rows[0]["deleted_at"]!=null||Text(rows[0],"site")!=failure.site||Text(rows[0],"source_id")!=failure.source_id||Text(rows[0],"record_type")!=failure.kind)throw new GalleryError(409,"The download entry changed. Review its current record.");
+                if(Convert.ToInt64(rows[0]["saved_files"])<1)throw new GalleryError(409,"Link a saved file to this entry in Gallery before marking the download handled.");
+            }
+            failure.resolved_utc=DateTime.UtcNow.ToString("o");failure.actor=context.User.Identity.Name;SaveQueue();return new{message="The manually linked saved file was verified. This failed download is resolved."};
+        }
+    }
     static bool IsOtherCollection(string key){return !String.IsNullOrEmpty(key)&&key.Split('/').Last().Equals("other",StringComparison.OrdinalIgnoreCase);}
     static bool NeedsOtherRouting(Collection c,Dictionary<string,object> row){return Text(row,"collection_override")!=c.Id&&!IsOtherCollection(c.Id)&&(Text(row,"status")=="excluded_unrelated"||IsOtherCollection(Text(row,"download_collection")));}
     public static string ClosestOtherCollection(string source,IEnumerable<string> collections){
@@ -173,7 +195,7 @@ public static partial class Gallery {
                 }
                 lock(QueueSync) {
                     foreach(var child in additions)if(!DownloadJob.entries.Any(e=>SameItem(e,child)))DownloadJob.entries.Add(child);
-                    DownloadJob.processed++;if(outcome=="resolved")DownloadJob.resolved++;if(outcome=="saved")DownloadJob.saved++;if(outcome=="existing")DownloadJob.existing++;if(outcome=="skipped")DownloadJob.skipped++;if(outcome=="failed"){DownloadJob.failed++;DownloadJob.errors.Add(DownloadJob.current+": "+error);}SaveQueue();
+                    DownloadJob.processed++;if(outcome=="resolved")DownloadJob.resolved++;if(outcome=="saved")DownloadJob.saved++;if(outcome=="existing")DownloadJob.existing++;if(outcome=="skipped")DownloadJob.skipped++;if(outcome=="failed"){DownloadJob.failed++;DownloadJob.errors.Add(DownloadJob.current+": "+error);DownloadJob.failed_entries.Add(new GalleryDownloadFailure{id=Guid.NewGuid().ToString("N"),error=error,entry_id=item.entry_id,collection=item.collection,site=item.site,source_id=item.id,kind=item.kind});}SaveQueue();
                 }
                 // Respect source request limits without tying progress to any browser.
                 if(token.WaitHandle.WaitOne(item.site=="Wallhaven" ? 1800 : 100))token.ThrowIfCancellationRequested();

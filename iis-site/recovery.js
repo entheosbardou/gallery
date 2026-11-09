@@ -20,7 +20,8 @@ async function loadRecoveryOperations(){
   const actions=el('div');actions.style.cssText='display:flex;flex-wrap:wrap;gap:8px;margin:12px 0';
   const isMove=item.operation_kind==='organize';
   const permission=/permission denied|access is denied|access denied/i.test(item.error||'');
-  const explanation=permission?'The worker was denied access to an image. This can be temporary. Retry this cleanup to check access again; a successful retry clears the issue.':isMove?'Choose whether to finish moving this file or leave the verified original in its original location.':'Choose which image to retain. Keeping one copy backs up the other copy and updates Gallery and downloader references before removing it.';
+  const exactDuplicate=item.operation_kind==='deduplicate'&&item.expected_source_sha256&&item.expected_source_sha256===item.expected_target_sha256;
+  const explanation=permission?'The worker was denied access to an image. This can be temporary. Retry this cleanup to check access again; a successful retry clears the issue.':isMove?'Choose whether to finish moving this file or leave the verified original in its original location.':exactDuplicate?'These files have the same recorded SHA-256. Gallery verifies both saved copies, updates their links, and removes the extra file. No backup copy is retained.':'Choose which image to retain. Gallery verifies both files and updates their references before removing one.';
   section.append(el('p',explanation));
   async function runChoice(route,payload){
    for(const button of actions.querySelectorAll('button'))button.disabled=true;
@@ -30,7 +31,7 @@ async function loadRecoveryOperations(){
   }
   function action(label,choice){const button=el('button',label);button.type='button';button.onclick=()=>runChoice('recovery-action',{choice});actions.append(button);return button;}
   if(isMove){action('Finish move','retry');action('Keep original location','cancel_move');}
-  else{action('Keep first copy','first');action('Keep second copy','second');action('Keep both copies','both');}
+  else{action('Keep first copy','first');action('Keep second copy','second');if(!exactDuplicate)action('Keep both copies','both');}
   action('Retry this cleanup','retry');
   if(shared){const resolve=el('button','Use saved copy and resolve');resolve.type='button';resolve.onclick=()=>runChoice('resolve-superseded-recovery',{});actions.append(resolve);}
   const restore=el('details');restore.append(el('summary','Restore or locate a missing copy'));

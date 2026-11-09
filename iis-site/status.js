@@ -30,6 +30,7 @@ function show(component,data,checked){
   node('moves-pending').textContent=number(count(data.counts,'pending'));node('moves-running').textContent=number(count(data.counts,'running'));node('moves-failed').textContent=number(count(data.counts,'failed'));
   const box=node('move-items');box.replaceChildren();if(!data.items?.length){const p=document.createElement('p');p.textContent='No queued, running, or failed collection moves.';box.append(p)}
   for(const job of data.items||[]){const section=document.createElement('section');section.className='row';const info=document.createElement('div');const title=document.createElement('strong');title.textContent=`${job.state==='pending'?'Queued':job.state==='running'?'Running':'Failed'} move #${job.id}: ${job.source_id||'entry '+job.entry_id} → ${job.target_collection}`;const detail=document.createElement('p');detail.textContent=`Files moved: ${number(job.processed)} of ${number(job.total)}${job.error?' · Reason: '+job.error:''}`;info.append(title,detail);section.append(info);if(job.state==='failed'){const retry=document.createElement('button');retry.type='button';retry.textContent='Retry move';retry.onclick=async()=>{retry.disabled=true;detail.textContent='Requesting retry…';try{const response=await fetch('/api/move-entry',{method:'POST',headers:{'Content-Type':'application/json','X-Gallery-Request':'1'},body:JSON.stringify({entry_id:job.entry_id,revision:job.current_revision,target_collection:job.target_collection})});const result=await response.json();if(!response.ok)throw Error(result.error||'Retry failed');detail.textContent='Retry queued.';refresh('moves')}catch(error){detail.textContent=error.message;retry.disabled=false}};section.append(retry)}box.append(section)}
+  (data.items||[]).forEach((job,index)=>{if(job.state!=='failed')return;const section=box.children[index];if(!section)return;const button=document.createElement('button');button.type='button';button.textContent='Withdraw unstarted move';button.onclick=async()=>{button.disabled=true;const detail=section.querySelector('p');detail.textContent='Checking whether this move changed any files…';try{const response=await fetch('/api/withdraw-failed-move',{method:'POST',headers:{'Content-Type':'application/json','X-Gallery-Request':'1'},body:JSON.stringify({id:job.id})});const result=await response.json();if(!response.ok)throw Error(result.error||'Withdrawal failed');detail.textContent=result.message;refresh('moves')}catch(error){detail.textContent=error.message;button.disabled=false}};section.append(button)});
   node('move-recent').replaceChildren(...(data.recent||[]).map(job=>{const li=document.createElement('li');li.textContent=`Move #${job.id} · entry ${job.source_id||job.entry_id} → ${job.target_collection} · completed ${stamp(job.completed_at)}`;return li}));
  }else if(component==='recovery'){
   const active=count(data,'planned')+count(data,'copied')+count(data,'linked'),errors=count(data,'error');
@@ -41,6 +42,15 @@ function show(component,data,checked){
   const item=data||{};state('download-state',item.phase?String(item.phase).replace(/^./,letter=>letter.toUpperCase()):'Idle',item.phase==='failed'?'bad':['queued','running'].includes(item.phase)?'busy':'ok');
   node('download-detail').textContent=item.phase&&item.phase!=='idle'?`${number(item.processed)} of ${number(item.total)} entries processed · ${number(item.saved)} saved · ${number(item.failed)} failed · updated ${stamp(item.updated_utc)}`:'No Gallery download job is active.';
   node('download-errors').replaceChildren(...(item.errors||[]).map(error=>{const li=document.createElement('li');li.textContent=error;return li}));
+  const failures=node('download-failures');failures.replaceChildren();
+  for(const failure of item.failed_entries||[]){if(failure.resolved_utc)continue;
+   const row=document.createElement('div');row.className='failed-job';const title=document.createElement('strong');title.textContent=`${failure.site} ${failure.source_id} · ${failure.collection}`;
+   const reason=document.createElement('p');reason.className='error';reason.textContent=failure.error||'Download failed';
+   const instructions=document.createElement('p');instructions.textContent='If you saved this image manually, link it to this entry in Gallery. Then verify the saved link here.';
+   const link=document.createElement('a');link.href='/';link.textContent='Open Gallery';
+   const verify=document.createElement('button');verify.type='button';verify.textContent='Verify manual saved file';verify.onclick=async()=>{verify.disabled=true;reason.textContent='Checking the saved file link…';try{const response=await fetch('/api/resolve-download-failure',{method:'POST',headers:{'Content-Type':'application/json','X-Gallery-Request':'1'},body:JSON.stringify({id:failure.id})});const result=await response.json();if(!response.ok)throw Error(result.error||'Verification failed');reason.textContent=result.message;refresh('downloads')}catch(error){reason.textContent=error.message;verify.disabled=false}};
+   row.append(title,reason,instructions,link,document.createTextNode(' '),verify);failures.append(row);
+  }
  }else if(component==='services'){
   node('wallhaven-state').textContent=data.wallhaven?'Available':'Unavailable';node('reddit-state').textContent=data.reddit?'Signed in':'Not signed in';
  }else{
@@ -80,18 +90,21 @@ async function reviewFailedJob(job,item){
   if(review.choice==='correct_checksum'){
    const recorded=document.createElement('p');recorded.className='detail';recorded.textContent=`Downloader file #${review.external_file_id}: recorded MD5 ${review.recorded_md5||'missing'}, SHA-256 ${review.recorded_sha256||'missing'}, size ${review.recorded_size==null?'missing':number(review.recorded_size)+' bytes'} · ${number(review.media_links)} linked media record(s).`;
    reviewBox.append(recorded);
-  }else{
+   if(review.duplicate_of_file_id){const duplicate=document.createElement('p');duplicate.className='detail';duplicate.textContent=`Downloader file #${review.duplicate_of_file_id} already records this SHA-256, MD5 ${review.duplicate_recorded_md5||'missing'}, and ${number(review.duplicate_recorded_size)} bytes. Gallery will verify both saved copies, merge their media links, and remove the extra file through the recovery worker. One saved copy will remain; no duplicate backup is retained.`;reviewBox.append(duplicate)}
+  }else if(review.choice==='accept_partial'){
    const explanation=document.createElement('p');explanation.textContent='Accepting this exact file allows Gallery to decode its recoverable image data. The original bytes are kept.';reviewBox.append(explanation);
+  }else{
+   const explanation=document.createElement('p');explanation.textContent='Close this job only after you have handled its work manually. Gallery will keep the saved file and stop retrying this processing stage. Hashing, matching, or reconciliation that this job would have performed will remain incomplete.';reviewBox.append(explanation);
   }
   const label=document.createElement('label'),check=document.createElement('input');check.type='checkbox';label.append(check,document.createTextNode(' I reviewed this file and the values above.'));
-  const apply=document.createElement('button');apply.type='button';apply.textContent=review.choice==='correct_checksum'?'Correct downloader checksum':'Accept partial image';apply.disabled=true;check.onchange=()=>{apply.disabled=!check.checked};
+  const apply=document.createElement('button');apply.type='button';apply.textContent=review.duplicate_of_file_id?'Merge verified duplicate records':review.choice==='correct_checksum'?'Correct downloader checksum':review.choice==='accept_partial'?'Accept partial image':'Close after manual handling';apply.disabled=true;check.onchange=()=>{apply.disabled=!check.checked};
   const result=document.createElement('p');result.setAttribute('role','status');
   apply.onclick=async()=>{apply.disabled=true;result.textContent='Applying your decision…';try{
-   const payload={id:job.id,choice:review.choice,sha256:review.actual_sha256,recorded_md5:review.recorded_md5,recorded_sha256:review.recorded_sha256,recorded_size:review.recorded_size};
-   const response=await fetch('/api/resolve-failed-file-job',{method:'POST',headers:{'Content-Type':'application/json','X-Gallery-Request':'1'},body:JSON.stringify(payload)});
+   const payload={id:job.id,choice:review.choice,sha256:review.actual_sha256,recorded_md5:review.recorded_md5,recorded_sha256:review.recorded_sha256,recorded_size:review.recorded_size,duplicate_of_file_id:review.duplicate_of_file_id};
+   const response=await fetch(review.choice==='close_after_manual_handling'?'/api/close-reviewed-file-job':'/api/resolve-failed-file-job',{method:'POST',headers:{'Content-Type':'application/json','X-Gallery-Request':'1'},body:JSON.stringify(payload)});
    if(response.status===401){window.galleryStatusAuthRedirect();return}
    const body=await response.json();if(!response.ok)throw Error(body.error||`HTTP ${response.status}`);
-   result.textContent='Decision saved. The job was queued for processing.';apply.remove();refresh('work');
+   result.textContent=body.message||'Decision saved. The job was queued for processing.';apply.remove();refresh('work');
   }catch(error){result.textContent='Could not apply decision: '+error.message;apply.disabled=false}};
   reviewBox.append(label,apply,result);
  }catch(error){message.textContent='Manual review unavailable: '+error.message}

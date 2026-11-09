@@ -1,6 +1,53 @@
 """Administrator recovery decisions, executed under the existing worker lock/account."""
-import json,traceback,shutil,os
+import json,traceback,shutil,os,hashlib,re
 PREFIX='recovery_action:'
+
+def resolve_reviewed_duplicate(W,db,request,key):
+ import FileManager as F
+ source_id=int(request['source_file_id']);target_id=int(request['target_file_id']);expected=bytes.fromhex(request['sha256'])
+ if source_id==target_id or len(expected)!=32:raise RuntimeError('Choose two different exact-match files.')
+ found=F.rows(db,'SELECT id,relative_path,byte_size,is_present,canonical_file_id FROM fm_file_catalog WHERE id IN (%s,%s)',(source_id,target_id))
+ if len(found)!=2:raise RuntimeError('A reviewed file record is missing.')
+ files={f['id']:f for f in found};source=files[source_id];target=files[target_id]
+ if any(not f['is_present'] or f['canonical_file_id'] for f in (source,target)) or source['relative_path']!=request['source_path'] or target['relative_path']!=request['target_path'] or source['byte_size']!=target['byte_size']:raise RuntimeError('The reviewed files changed. Review them again.')
+ with W.protected(W.safe(source['relative_path'])) as first,W.protected(W.safe(target['relative_path'])) as kept:
+  if first.tell()!=0 or kept.tell()!=0 or first.seek(0,2)!=kept.seek(0,2):raise RuntimeError('The file lengths differ. No duplicate was merged.')
+  if W.hashstream(first)!=expected or W.hashstream(kept)!=expected:raise RuntimeError('The file bytes changed. No duplicate was merged.')
+  kept.seek(0);md5=hashlib.md5()
+  for block in iter(lambda:kept.read(1024*1024),b''):md5.update(block)
+  size=kept.tell()
+  if size!=source['byte_size']:raise RuntimeError('The saved file size changed. No duplicate was merged.')
+  db.begin()
+  try:
+   locked=F.rows(db,'SELECT id,relative_path,is_present,canonical_file_id FROM files WHERE id IN (%s,%s) ORDER BY id FOR UPDATE',(source_id,target_id))
+   if len(locked)!=2 or any(not f['is_present'] or f['canonical_file_id'] or f['relative_path']!=files[f['id']]['relative_path'] for f in locked):raise RuntimeError('The file pointers changed. Review them again.')
+   config=F.rows(db,"SELECT c.database_name,c.enabled,c.adapter_kind FROM fm_adapter_config c WHERE c.integration_key='booru'")
+   if len(config)!=1 or not config[0]['enabled'] or config[0]['adapter_kind']!='booru-locations':raise RuntimeError('The Booru downloader integration is unavailable.')
+   schema=config[0]['database_name']
+   if not re.fullmatch('[A-Za-z0-9_-]+',schema):raise RuntimeError('Invalid downloader database name.')
+   bindings=F.rows(db,"SELECT b.file_id,b.external_id,b.last_known_path FROM fm_external_bindings b JOIN fm_integrations i ON i.id=b.integration_id WHERE i.integration_key='booru' AND b.file_id IN (%s,%s) ORDER BY b.file_id FOR UPDATE",(source_id,target_id))
+   if len(bindings)!=2 or {b['file_id'] for b in bindings}!={source_id,target_id}:raise RuntimeError('The downloader links changed. Review them again.')
+   bound={b['file_id']:b for b in bindings}
+   locations=F.rows(db,f'SELECT l.id,l.file_id,l.relative_path,l.status,f.md5,f.sha256,f.size_bytes FROM `{schema}`.file_locations l JOIN `{schema}`.files f ON f.id=l.file_id WHERE l.id IN (%s,%s) ORDER BY l.id FOR UPDATE',(int(bound[source_id]['external_id']),int(bound[target_id]['external_id'])))
+   if len(locations)!=2:raise RuntimeError('A downloader location changed. Review it again.')
+   byid={l['id']:l for l in locations};old=byid[int(bound[source_id]['external_id'])];owner=byid[int(bound[target_id]['external_id'])]
+   if old['file_id']==owner['file_id'] or any(l['status']!='present' for l in (old,owner)) or any(l['relative_path']!=bound[fid]['last_known_path'] or l['relative_path']!=files[fid]['relative_path'] for fid,l in ((source_id,old),(target_id,owner))):raise RuntimeError('The downloader locations changed. Review them again.')
+   if owner['sha256']!=expected.hex() or owner['md5']!=md5.hexdigest() or owner['size_bytes']!=size:raise RuntimeError('The retained downloader record does not match verified bytes.')
+   remaining=F.rows(db,f"SELECT COUNT(*) n FROM `{schema}`.file_locations WHERE file_id=%s AND status='present'",(old['file_id'],))[0]['n']
+   if remaining!=1:raise RuntimeError('The old downloader record has another present location. Review its links.')
+   F.execute(db,f'INSERT IGNORE INTO `{schema}`.media_files(media_id,file_id) SELECT media_id,%s FROM `{schema}`.media_files WHERE file_id=%s',(owner['file_id'],old['file_id']))
+   F.execute(db,f'UPDATE `{schema}`.file_locations SET file_id=%s,last_checked_at=UTC_TIMESTAMP(6) WHERE id=%s AND file_id=%s',(owner['file_id'],old['id'],old['file_id']))
+   F.execute(db,f'DELETE FROM `{schema}`.media_files WHERE file_id=%s',(old['file_id'],))
+   if F.rows(db,f'SELECT id FROM `{schema}`.file_locations WHERE file_id=%s LIMIT 1',(old['file_id'],)):raise RuntimeError('The old downloader record still has a location.')
+   # All posts and locations now reference the retained identity. Remove the
+   # obsolete downloader file row after verifying it has no remaining links.
+   F.execute(db,f'DELETE FROM `{schema}`.files WHERE id=%s',(old['file_id'],))
+   F.execute(db,"UPDATE fm_work_items SET state='pending',failure_count=0,available_at=UTC_TIMESTAMP(6),error=NULL WHERE file_id IN (%s,%s) AND task_kind='match_file' AND state='failed'",(source_id,target_id))
+   request.update(status='done',message='Downloader posts now share one verified file record; physical duplicate removal queued.')
+   F.execute(db,'UPDATE gallery_state SET value=%s WHERE state_key=%s',(W.dumps(request),key))
+   F.execute(db,"INSERT INTO gallery_state(state_key,value) VALUES('worker_requested',%s) ON DUPLICATE KEY UPDATE value=VALUES(value)",(W.dumps({'requested':True}),))
+   db.commit()
+  except Exception:db.rollback();raise
 
 def same_plan(a,b):
  return all(a.get(k)==b.get(k) for k in ('source_file_id','target_file_id','source_path','target_path'))
@@ -41,6 +88,7 @@ def apply(W,db,op,request):
   if W.q(db,'SELECT move_id FROM fm_collection_move_files WHERE operation_id=%s LIMIT 1',(op['id'],)):
    raise RuntimeError('This file belongs to a collection move. Retry the move instead of merging its files.')
   if choice=='both':
+   if bytes(op['source_sha256'])==bytes(op['target_sha256']):raise RuntimeError('These files are exact duplicates. Choose one saved copy to keep.')
    db.begin()
    try:
     W.run(db,"UPDATE duplicate_matches SET review_state='rejected' WHERE file_id_low=%s AND file_id_high=%s",(min(op['source_file_id'],op['target_file_id']),max(op['source_file_id'],op['target_file_id'])))
@@ -89,6 +137,12 @@ def apply(W,db,op,request):
 
 def drain(W,db):
  # Called only while the normal worker owns wallpapers_database_worker.
+ manual=W.q(db,"SELECT state_key,value FROM gallery_state WHERE state_key LIKE 'manual_duplicate_request:%%' AND JSON_UNQUOTE(JSON_EXTRACT(value,'$.status')) IN ('pending','working') ORDER BY state_key LIMIT 10")
+ for row in manual:
+  request=W.decode(row['value']);request['status']='working';W.state(db,row['state_key'],request)
+  try:resolve_reviewed_duplicate(W,db,request,row['state_key'])
+  except Exception as error:
+   db.rollback();request.update(status='failed',message=str(error));W.state(db,row['state_key'],request);print('Manual duplicate review: '+traceback.format_exc(),flush=True)
  requests=W.q(db,"SELECT state_key,value FROM gallery_state WHERE state_key LIKE 'recovery_action:%%' AND JSON_UNQUOTE(JSON_EXTRACT(value,'$.status')) IN ('pending','working') ORDER BY state_key LIMIT 10")
  for row in requests:
   request=W.decode(row['value'])
@@ -121,5 +175,5 @@ def friendly(error):
  if isinstance(error,PermissionError):return 'Storage denied the worker access to this image. Close any app locking it and check NAS access for the Gallery worker account, then retry this cleanup.'
  if isinstance(error,FileNotFoundError):return 'This copy is missing. Restore its backup or locate an existing copy below, then retry.'
  message=str(error)
- if 'Downloader MD5 differs' in message or 'Downloader SHA256 differs' in message:return 'The downloader record does not match the actual image. Keep both copies, restore the original copy from backup, or repair the downloader record before merging.'
+ if 'Downloader MD5 differs' in message or 'Downloader SHA256 differs' in message:return 'The downloader record does not match the actual image. Review the failed matching job to correct or merge its verified downloader record, then retry keeping one copy.'
  return message
