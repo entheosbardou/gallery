@@ -214,6 +214,27 @@ public static partial class Gallery {
    tx.Commit();return new{move_id=job,state="pending"};
   }
  }
+ public static object DatabaseChangeCategory(Dictionary<string,object> payload){
+  long id,revision;if(!Int64.TryParse(Text(payload,"entry_id"),out id)||!Int64.TryParse(Text(payload,"revision"),out revision))throw new GalleryError(400,"Choose a saved image.");
+  string category=Text(payload,"category").Trim().ToLowerInvariant();if(!new[]{"sfw","sketchy","nsfw","not_provided"}.Contains(category))throw new GalleryError(400,"Choose a valid category.");
+  using(var db=OpenDatabase())using(var tx=db.BeginTransaction()){
+   var rows=DBRows(db,tx,"SELECT id,revision,inventory_document_id,collection_id,record_type,status,category FROM inventory_entries WHERE id=@id AND deleted_at IS NULL FOR UPDATE","@id",id);
+   if(rows.Count!=1||Convert.ToInt64(rows[0]["revision"])!=revision)throw new GalleryError(409,"This entry changed. Refresh before changing its category.");
+   var row=rows[0];if(Text(row,"record_type")!="image"||Text(row,"status")!="saved")throw new GalleryError(400,"Choose a saved image.");
+   if(DBRows(db,tx,"SELECT id FROM fm_collection_moves WHERE entry_id=@id AND state IN ('pending','running') LIMIT 1","@id",id).Count>0)throw new GalleryError(409,"A move is already queued for this entry.");
+   var retry=DBRows(db,tx,"SELECT m.id FROM fm_collection_moves m JOIN gallery_state s ON s.state_key=CONCAT('category_move:',m.id) WHERE m.entry_id=@id AND m.state='failed' AND JSON_UNQUOTE(JSON_EXTRACT(s.value,'$.category'))=@category ORDER BY m.id DESC LIMIT 1","@id",id,"@category",category);
+   if(retry.Count>0){long previous=Convert.ToInt64(retry[0]["id"]);DBExec(db,tx,"UPDATE fm_collection_moves SET state='pending',error=NULL WHERE id=@id","@id",previous);tx.Commit();return new{move_id=previous,state="pending"};}
+   if(Text(row,"category").ToLowerInvariant()==category)throw new GalleryError(400,"This image already has that category.");
+   var files=DBRows(db,tx,"SELECT DISTINCT COALESCE(f.canonical_file_id,f.id) id FROM fm_entry_file_projection l JOIN fm_file_catalog f ON f.id=l.file_id WHERE l.entry_id=@id","@id",id);
+   if(files.Count!=1)throw new GalleryError(409,"This entry does not have exactly one saved file. Review its file links first.");
+   if(DBRows(db,tx,"SELECT e.id FROM fm_entry_file_projection l JOIN inventory_entries e ON e.id=l.entry_id AND e.deleted_at IS NULL WHERE l.file_id=@file AND e.id<>@id LIMIT 1","@file",files[0]["id"],"@id",id).Count>0)throw new GalleryError(409,"This file is shared with another entry. Review its categories before moving it.");
+   DBExec(db,tx,"INSERT INTO fm_collection_moves(entry_id,source_document_id,source_collection_id,target_collection_id) VALUES(@entry,@doc,@collection,@collection)","@entry",id,"@doc",row["inventory_document_id"],"@collection",row["collection_id"]);
+   long job=Convert.ToInt64(DBRows(db,tx,"SELECT LAST_INSERT_ID() id")[0]["id"]);
+   DBExec(db,tx,"INSERT INTO fm_collection_move_files(move_id,file_id) VALUES(@move,@file)","@move",job,"@file",files[0]["id"]);
+   DBExec(db,tx,"INSERT INTO gallery_state(state_key,value) VALUES(@key,@value)","@key","category_move:"+job,"@value",Json.Serialize(new{category=category}));
+   tx.Commit();return new{move_id=job,state="pending"};
+  }
+ }
  public static object DatabaseMoveStatus(HttpContext context){
   long id;if(!Int64.TryParse(context.Request.QueryString["id"],out id))throw new GalleryError(400,"Choose a move.");
   using(var db=OpenDatabase()){

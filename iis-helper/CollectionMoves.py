@@ -5,15 +5,18 @@ import FileManager as F
 import FileManagerWorker as M
 
 def move_file(W,db,job,item,target):
+ category_move=job.get('target_category')
  f=F.rows(db,'SELECT f.*,c.collection_key owner FROM fm_file_catalog f JOIN collections c ON c.id=f.collection_id WHERE f.id=%s',(item['file_id'],))[0]
  if not f['is_present']:raise RuntimeError('A saved file is unavailable; reconnect storage and retry.')
  if not M.can_manage(db,f['relative_path'],f['id'])[0]:raise RuntimeError('The source downloader database must be ready before moving this file.')
  op=None
  if item['operation_id']:op=F.rows(db,'SELECT * FROM file_operations WHERE id=%s',(item['operation_id'],))[0]
  if op is None:
-  if f['collection_id']==target['id']:
+  if f['collection_id']==target['id'] and not category_move:
    F.execute(db,"UPDATE fm_collection_move_files SET state='completed' WHERE move_id=%s AND file_id=%s",(job['id'],f['id']));return
-  category=str(W.path_category(f['relative_path'],f['owner']) or 'not_provided')
+  if category_move and W.path_category(f['relative_path'],f['owner'])==category_move:
+   F.execute(db,"UPDATE fm_collection_move_files SET state='completed' WHERE move_id=%s AND file_id=%s",(job['id'],f['id']));return
+  category=category_move or str(W.path_category(f['relative_path'],f['owner']) or 'not_provided')
   name=Path(f['relative_path']).name;relative='/'.join(x for x in [target['collection_key'] if target['collection_key']!='.' else '',category,name] if x)
   if W.nearest_collection(relative,W.marker_keys(db))!=target['collection_key']:raise RuntimeError('The destination falls inside a nested collection; choose that collection instead.')
   allowed,why=M.can_relocate(db,f['id'],relative)
@@ -74,11 +77,12 @@ def finish(W,db,job,target):
   def patch(r):
    import CurrentLocations
    cleaned=CurrentLocations.clean(r);r.clear();r.update(cleaned)
-   r['collection_override']=target['collection_key'];r['download_collection']=target['collection_key']
+   if job.get('target_category'):r['category']=job['target_category']
+   else:r['collection_override']=target['collection_key'];r['download_collection']=target['collection_key']
   if not W.update_entry(db,e['id'],patch,'collection_manually_assigned'):raise RuntimeError('The entry changed; retry the move.')
-  F.execute(db,'UPDATE inventory_entries SET collection_id=%s WHERE id=%s',(target['id'],e['id']))
+  if not job.get('target_category'):F.execute(db,'UPDATE inventory_entries SET collection_id=%s WHERE id=%s',(target['id'],e['id']))
   # A parent move also reassigns its individual children; provenance stays intact.
-  F.execute(db,"UPDATE inventory_entries child JOIN inventory_entry_relations r ON r.related_entry_id=child.id SET child.collection_id=%s WHERE r.entry_id=%s AND r.relation_kind='parent_of'",(target['id'],e['id']))
+  if not job.get('target_category'):F.execute(db,"UPDATE inventory_entries child JOIN inventory_entry_relations r ON r.related_entry_id=child.id SET child.collection_id=%s WHERE r.entry_id=%s AND r.relation_kind='parent_of'",(target['id'],e['id']))
   F.execute(db,"UPDATE fm_collection_moves SET state='completed',source_collection_id=NULL,error=NULL,completed_at=UTC_TIMESTAMP(6) WHERE id=%s",(job['id'],));db.commit()
  except Exception:db.rollback();raise
 
@@ -87,6 +91,8 @@ def process(W,db):
  if not jobs:return False
  job=jobs[0]
  try:
+  setting=F.rows(db,'SELECT value FROM gallery_state WHERE state_key=%s',('category_move:'+str(job['id']),))
+  if setting:job['target_category']=json.loads(setting[0]['value'])['category']
   W.require_root();target=F.rows(db,'SELECT c.id,c.collection_key FROM collections c JOIN fm_collection_discovery m ON m.collection_id=c.id WHERE c.id=%s AND m.is_marked=TRUE',(job['target_collection_id'],))
   if not target or not (W.ROOT/target[0]['collection_key']/'_download-info').is_dir():raise RuntimeError('Destination collection marker is unavailable.')
   target=target[0]

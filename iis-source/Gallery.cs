@@ -78,6 +78,7 @@ public class GalleryHandler : IHttpHandler {
             if(route=="download") { Reply(c,200,Gallery.Download(payload)); return; }
             if(route=="delete-entry") { Reply(c,200,Gallery.DeleteEntry(payload)); return; }
             if(route=="move-entry") {Reply(c,202,Gallery.DatabaseMoveEntry(payload));return;}
+            if(route=="change-category") {Reply(c,202,Gallery.DatabaseChangeCategory(payload));return;}
             if(route=="set-tags") { Reply(c,200,Gallery.DatabaseSetTags(payload));return; }
             if(route=="downloads-filtered") { Reply(c,202,Gallery.EnqueueFilteredDownloads(c));return;}
             if(route=="downloads") { Reply(c,202,Gallery.EnqueueDownloads(payload)); return; }
