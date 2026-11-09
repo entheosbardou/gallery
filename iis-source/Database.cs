@@ -92,6 +92,24 @@ public static partial class Gallery {
  public static void RequestDatabaseImportUpdates(){SetDatabaseState("import_updates",new{requested=true});}
  public static object RequestDatabaseWorker(){SetDatabaseState("worker_requested",new{requested=true});var current=DatabaseState("worker_status") as Dictionary<string,object>;if(current!=null&&Text(current,"phase")=="scanning")return current;var result=new{phase="scanning",message="Background database processing requested."};SetDatabaseState("worker_status",result);return result;}
  public static object DatabaseWorkerStatus(){return DatabaseState("worker_status")??new{phase="idle"};}
+ public static object DatabaseFailedFileJobs(string cursor){
+  long after=0;if(cursor!=""&&(!Int64.TryParse(cursor,out after)||after<0))throw new GalleryError(400,"Invalid failed-job cursor.");
+  using(var db=OpenDatabase()){
+   var rows=DBRows(db,null,"SELECT w.id,w.task_kind,w.file_id,w.failure_count,w.error,w.available_at,f.relative_path,c.collection_key FROM fm_work_items w LEFT JOIN fm_file_catalog f ON f.id=w.file_id LEFT JOIN collections c ON c.id=f.collection_id WHERE w.state='failed' AND w.id>@after ORDER BY w.id LIMIT 51","@after",after);
+   bool more=rows.Count>50;if(more)rows.RemoveAt(50);
+   return new{items=rows,has_more=more,next_after=more&&rows.Count>0?(object)rows.Last()["id"]:null};
+  }
+ }
+ public static object DatabaseRetryFailedFileJob(Dictionary<string,object> payload){
+  long id;if(!Int64.TryParse(Text(payload,"id"),out id)||id<1)throw new GalleryError(400,"Choose a failed file job.");
+  using(var db=OpenDatabase())using(var tx=db.BeginTransaction()){
+   var rows=DBRows(db,tx,"SELECT id,state FROM fm_work_items WHERE id=@id FOR UPDATE","@id",id);
+   if(rows.Count==0)throw new GalleryError(404,"File job not found.");
+   if(Text(rows[0],"state")!="failed")throw new GalleryError(409,"This file job is no longer failed. Refresh the list.");
+   DBExec(db,tx,"UPDATE fm_work_items SET state='pending',failure_count=0,available_at=UTC_TIMESTAMP(6),lease_owner=NULL,lease_token=NULL,lease_expires_at=NULL,error=NULL WHERE id=@id AND state='failed'","@id",id);
+   tx.Commit();return new{job_id=id,state="pending"};
+  }
+ }
  public static object DatabaseSystemComponent(string component){using(var db=OpenDatabase()){
   object data;
   if(component=="worker"||component=="issues"){

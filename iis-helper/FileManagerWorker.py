@@ -328,7 +328,15 @@ def process(W,db,token,job):
     info=W.flash_info(W.safe(current[0]['relative_path']))
     F.execute(db,"INSERT INTO file_hashes(file_id,hash_kind,algorithm,algorithm_version,hash_value,hash_bits,source_byte_size,source_modified_utc_ticks,computed_at) VALUES(%s,'file_sha256','sha256','1',%s,256,%s,%s,UTC_TIMESTAMP(6)) ON DUPLICATE KEY UPDATE hash_value=VALUES(hash_value),source_byte_size=VALUES(source_byte_size),source_modified_utc_ticks=VALUES(source_modified_utc_ticks)",(fid,info['digest'],info['bytes'],info['ticks']))
     errors=[]
-   else:result,hits,errors=W.hash_files(db,None,[fid])
+   else:
+    manual=W.state(db,'manual_truncated:'+str(fid))
+    approved=bool(manual and manual.get('sha256')==W.filehash(W.safe(current[0]['relative_path'])).hex() and int(manual.get('bytes',-1))==current[0]['byte_size'] and int(manual.get('ticks',-1))==current[0]['modified_utc_ticks'])
+    if approved:
+     from PIL import ImageFile
+     previous=ImageFile.LOAD_TRUNCATED_IMAGES;ImageFile.LOAD_TRUNCATED_IMAGES=True
+     try:result,hits,errors=W.hash_files(db,None,[fid])
+     finally:ImageFile.LOAD_TRUNCATED_IMAGES=previous
+    else:result,hits,errors=W.hash_files(db,None,[fid])
    if errors:raise RuntimeError(errors[0]['error'])
    manual_entry(W,db,fid)
    F.execute(db,'INSERT INTO fm_file_dirty(file_id) VALUES(%s) ON DUPLICATE KEY UPDATE generation=generation+1',(fid,))
