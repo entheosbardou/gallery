@@ -227,7 +227,7 @@ public static partial class Gallery {
    if(Text(row,"category").ToLowerInvariant()==category)throw new GalleryError(400,"This image already has that category.");
    var files=DBRows(db,tx,"SELECT DISTINCT COALESCE(f.canonical_file_id,f.id) id FROM fm_entry_file_projection l JOIN fm_file_catalog f ON f.id=l.file_id WHERE l.entry_id=@id","@id",id);
    if(files.Count!=1)throw new GalleryError(409,"This entry does not have exactly one saved file. Review its file links first.");
-   if(DBRows(db,tx,"SELECT e.id FROM fm_entry_file_projection l JOIN inventory_entries e ON e.id=l.entry_id AND e.deleted_at IS NULL WHERE l.file_id=@file AND e.id<>@id LIMIT 1","@file",files[0]["id"],"@id",id).Count>0)throw new GalleryError(409,"This file is shared with another entry. Review its categories before moving it.");
+   if(DBRows(db,tx,"SELECT e.id FROM fm_entry_file_projection l JOIN inventory_entries e ON e.id=l.entry_id AND e.deleted_at IS NULL WHERE l.file_id=@file AND e.id<>@id AND (e.status<>'duplicate' OR e.is_hidden=FALSE OR e.record_type<>'image') LIMIT 1","@file",files[0]["id"],"@id",id).Count>0)throw new GalleryError(409,"This file is shared with another visible or non-image entry. Review its categories before moving it.");
    DBExec(db,tx,"INSERT INTO fm_collection_moves(entry_id,source_document_id,source_collection_id,target_collection_id) VALUES(@entry,@doc,@collection,@collection)","@entry",id,"@doc",row["inventory_document_id"],"@collection",row["collection_id"]);
    long job=Convert.ToInt64(DBRows(db,tx,"SELECT LAST_INSERT_ID() id")[0]["id"]);
    DBExec(db,tx,"INSERT INTO fm_collection_move_files(move_id,file_id) VALUES(@move,@file)","@move",job,"@file",files[0]["id"]);

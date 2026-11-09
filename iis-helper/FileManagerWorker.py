@@ -540,6 +540,7 @@ def main(W,once=False):
     TagSync.sync_batch(db,100)
    import CollectionMoves
    moved=CollectionMoves.process(W,db)
+   F.sync_duplicate_categories_batch(db)
    requested=W.state(db,'worker_requested').get('requested',False);imports=W.state(db,'import_updates').get('requested',False)
    initial_scan_due=False
    if last_scan==0:

@@ -203,7 +203,9 @@ def import_documents(db,allow_updates=False):
       def merge(old):
        for k,v in r.items():
         if k in ['status','file','file_collection','duplicate_of','duplicate_collection','related_image_references','related_image_files','saved_image_references','duplicate_record_of','duplicate_record_site','duplicate_record_collection','sha256','file_size','bytes','download_collection','origin_collection'] and old.get(k):continue
-        if v is not None:old[k]=v
+        if v is not None:
+         if k=='category':old.pop('duplicate_source_category',None)
+         old[k]=v
       update_entry(db,e['id'],merge,'inventory_update')
      else:
       eid=run(db,'INSERT INTO inventory_entries(inventory_document_id,source_ordinal,site,source_id,record_type,status,category,description,source_url,image_url,resolution,raw_record,record_sha256,is_hidden,metadata_score) VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)',(doc,ordinal if known else i,str(r.get('site','')),str(r.get('id','')),str(r.get('record_type','')),str(r.get('status','')),r.get('category'),r.get('description'),r.get('source'),r.get('url'),r.get('resolution'),raw,sha(raw.encode()),r.get('status')=='duplicate',metadata_score(r)))[0]
@@ -354,7 +356,7 @@ def refresh_manual_categories(db):
   if r.get('manual_import'):
    primary=next((f for f in refs if f['reference_kind']=='primary'),None)
    category=path_category(primary['relative_path'],target) if primary else None
-   if category and category!=row['category']:update_entry(db,row['id'],{'category':category},'manual_folder_category')
+   if category and category!=row['category']:update_entry(db,row['id'],{'category':category,'duplicate_source_category':category},'manual_folder_category')
   if source==target:continue
   db.begin()
   try:

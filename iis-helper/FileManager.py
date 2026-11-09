@@ -90,6 +90,8 @@ def index_entry(db,e):
   execute(db,'INSERT INTO fm_source_assets VALUES(%s,%s,%s)',(source,len(seen)-1,asset))
  import CurrentLocations
  CurrentLocations.clean_entry(db,e)
+ if e['canonical_entry_id'] is not None:sync_duplicate_category_group(db,e['canonical_entry_id'])
+ elif rows(db,'SELECT id FROM inventory_entries WHERE canonical_entry_id=%s AND deleted_at IS NULL LIMIT 1',(e['id'],)):sync_duplicate_category_group(db,e['id'])
 
 def normalize_entry(db,e,raw,replace_graph=False):
  owner=rows(db,'SELECT c.collection_key FROM inventory_documents d JOIN collections c ON c.id=d.collection_id WHERE d.id=%s',(e['inventory_document_id'],))[0]['collection_key']
@@ -132,8 +134,8 @@ def route_entry(db,e,raw):
 
 def folder_rank(relative,owner):
  name=relative if owner=='.' else relative[len(owner)+1:]
- ranks={'sfw':1,'not_provided':2,'sketchy':3,'nsfw':4}
- return max([ranks.get(p.lower(),0) for p in name.replace('\\','/').split('/')[:-1]]+[0]) or 2
+ ranks={'sfw':1,'not_provided':0,'sketchy':2,'nsfw':3}
+ return max([ranks.get(p.lower(),0) for p in name.replace('\\','/').split('/')[:-1]]+[0])
 
 def index_file(db,f):
  previous_location=rows(db,'SELECT l.is_present,l.byte_size,l.modified_utc_ticks,a.id asset_id,a.canonical_asset_id,a.width,a.height,a.category FROM fm_asset_locations l JOIN fm_assets a ON a.id=l.asset_id WHERE l.legacy_file_id=%s',(f['id'],))
@@ -143,9 +145,9 @@ def index_file(db,f):
   execute(db,'UPDATE fm_assets SET legacy_canonical_file_id=NULL WHERE id=%s',(previous_location[0]['asset_id'],))
  if reappeared:execute(db,"UPDATE fm_work_items SET state='pending',failure_count=0,available_at=UTC_TIMESTAMP(6) WHERE file_id=%s AND expected_size=%s AND expected_ticks=%s AND state IN ('completed','cancelled')",(f['id'],f['byte_size'],f['modified_utc_ticks']))
  # Match the existing access policy: most restrictive file-linked label/folder wins.
- labels=rows(db,"SELECT COUNT(*) active_records,MAX(CASE WHEN e.record_type='image' THEN CASE LOWER(COALESCE(e.category,'')) WHEN 'sfw' THEN 1 WHEN 'sketchy' THEN 3 WHEN 'nsfw' THEN 4 ELSE 2 END ELSE CASE LOWER(COALESCE(e.category,'')) WHEN 'sketchy' THEN 3 WHEN 'nsfw' THEN 4 ELSE 0 END END) AS rank_value FROM (SELECT e.record_type,e.category FROM files f JOIN inventory_entries e ON e.file_id=f.id AND e.deleted_at IS NULL WHERE f.id=%s OR f.canonical_file_id=%s UNION ALL SELECT parent.record_type,parent.category FROM files f JOIN inventory_entries child ON child.file_id=f.id AND child.deleted_at IS NULL JOIN inventory_entry_relations r ON r.related_entry_id=child.id AND r.relation_kind='parent_of' JOIN inventory_entries parent ON parent.id=r.entry_id AND parent.deleted_at IS NULL WHERE f.id=%s OR f.canonical_file_id=%s) e",(f['id'],f['id'],f['id'],f['id']))[0]
+ labels=rows(db,"SELECT COUNT(*) active_records,MAX(CASE WHEN e.record_type='image' THEN CASE LOWER(COALESCE(e.category,'')) WHEN 'sfw' THEN 1 WHEN 'sketchy' THEN 2 WHEN 'nsfw' THEN 3 ELSE 0 END ELSE CASE LOWER(COALESCE(e.category,'')) WHEN 'sketchy' THEN 2 WHEN 'nsfw' THEN 3 ELSE 0 END END) AS rank_value FROM (SELECT e.record_type,e.category FROM files f JOIN inventory_entries e ON e.file_id=f.id AND e.deleted_at IS NULL WHERE f.id=%s OR f.canonical_file_id=%s UNION ALL SELECT parent.record_type,parent.category FROM files f JOIN inventory_entries child ON child.file_id=f.id AND child.deleted_at IS NULL JOIN inventory_entry_relations r ON r.related_entry_id=child.id AND r.relation_kind='parent_of' JOIN inventory_entries parent ON parent.id=r.entry_id AND parent.deleted_at IS NULL WHERE f.id=%s OR f.canonical_file_id=%s) e",(f['id'],f['id'],f['id'],f['id']))[0]
  rank=max(labels['rank_value'] or 0,folder_rank(f['relative_path'],f['owner']))
- category={1:'sfw',2:'not_provided',3:'sketchy',4:'nsfw'}[rank] if labels['active_records'] else '__unlisted__'
+ category={0:'not_provided',1:'sfw',2:'sketchy',3:'nsfw'}[rank] if labels['active_records'] else '__unlisted__'
  execute(db,'UPDATE files SET access_category=%s,file_name=%s WHERE id=%s AND (NOT(access_category <=> %s) OR NOT(file_name <=> %s))',(category,f['relative_path'].replace('\\','/').split('/')[-1],f['id'],category,f['relative_path'].replace('\\','/').split('/')[-1]))
  aid,_=execute(db,'INSERT INTO fm_assets(legacy_canonical_file_id,category,width,height) VALUES(%s,%s,%s,%s) ON DUPLICATE KEY UPDATE id=LAST_INSERT_ID(id),category=VALUES(category),width=VALUES(width),height=VALUES(height)',(f['id'],category,f['width'],f['height']))
  if f['canonical_file_id']:
@@ -191,6 +193,43 @@ def visual_bands(value):
  for band,width in enumerate((11,11,11,11,10,10)):
   yield band,(bits>>shift)&((1<<width)-1);shift+=width
 
+def duplicate_label(row):
+ raw=decode(row['raw_record'])
+ value=raw.get('duplicate_source_category',row['category'])
+ return value.lower() if isinstance(value,str) and value.lower() in ('nsfw','sketchy','sfw') else 'not_provided'
+
+def sync_duplicate_category_group(db,primary_id):
+ group=rows(db,'SELECT id,category,raw_record,canonical_entry_id,revision FROM inventory_entries WHERE deleted_at IS NULL AND (id=%s OR canonical_entry_id=%s) ORDER BY id FOR UPDATE',(primary_id,primary_id))
+ primary=next((e for e in group if e['id']==primary_id and e['canonical_entry_id'] is None),None)
+ if not primary or len(group)<2:return 0
+ chosen=next(label for label in ('nsfw','sketchy','sfw','not_provided') if any(duplicate_label(e)==label for e in group))
+ if primary['category']==chosen:return 0
+ raw=decode(primary['raw_record']).copy()
+ if 'duplicate_source_category' not in raw:raw['duplicate_source_category']=duplicate_label(primary)
+ raw['category']=chosen
+ serialized=json.dumps(raw,sort_keys=True,ensure_ascii=False,separators=(',',':'))
+ _,changed=execute(db,'UPDATE inventory_entries SET category=%s,raw_record=%s,record_sha256=%s WHERE id=%s AND revision=%s',(chosen,serialized,hashlib.sha256(serialized.encode()).digest(),primary_id,primary['revision']))
+ if changed!=1:raise RuntimeError('Duplicate category changed concurrently; retry this group.')
+ execute(db,"INSERT INTO inventory_entry_history(entry_id,revision,action,previous_record,new_record,actor) SELECT id,revision,'duplicate_category_inherited',%s,%s,'File manager' FROM inventory_entries WHERE id=%s",(primary['raw_record'],serialized,primary_id))
+ return 1
+
+def sync_duplicate_categories_batch(db,size=200):
+ key='duplicate_category_backfill_v1'
+ saved=rows(db,'SELECT value FROM gallery_state WHERE state_key=%s',(key,))
+ state=decode(saved[0]['value']) if saved else {'after':0}
+ if state.get('complete'):return 0
+ batch=rows(db,'SELECT id,canonical_entry_id FROM inventory_entries WHERE id>%s AND canonical_entry_id IS NOT NULL AND deleted_at IS NULL ORDER BY id LIMIT %s',(state['after'],size))
+ if not batch:
+  execute(db,'INSERT INTO gallery_state(state_key,value) VALUES(%s,%s) ON DUPLICATE KEY UPDATE value=VALUES(value)',(key,json.dumps({'after':state['after'],'complete':True})))
+  return 0
+ db.begin()
+ try:
+  changed=sum(sync_duplicate_category_group(db,primary_id) for primary_id in sorted({r['canonical_entry_id'] for r in batch}))
+  execute(db,'INSERT INTO gallery_state(state_key,value) VALUES(%s,%s) ON DUPLICATE KEY UPDATE value=VALUES(value)',(key,json.dumps({'after':batch[-1]['id']})))
+  db.commit()
+ except Exception:db.rollback();raise
+ return changed
+
 def aliases_for_file(db,f):
  entries=rows(db,"SELECT DISTINCT e.id,e.site,e.source_id,e.record_type,e.metadata_score,e.is_hidden,e.canonical_entry_id,e.status,e.collection_id,EXISTS(SELECT 1 FROM fm_collection_moves mv WHERE mv.entry_id=e.id AND mv.state='completed') manual_placement FROM inventory_entries e WHERE e.deleted_at IS NULL AND e.file_id=%s AND e.record_type='image'",(f['id'],))
  if not entries:return
@@ -201,6 +240,7 @@ def aliases_for_file(db,f):
   execute(db,'UPDATE inventory_entries SET is_hidden=%s,canonical_entry_id=%s,status=%s WHERE id=%s',(hidden,canonical,status,e['id']))
   if hidden:execute(db,"INSERT IGNORE INTO inventory_entry_relations(entry_id,related_entry_id,relation_kind) VALUES(%s,%s,'duplicate_of')",(e['id'],primary['id']))
   execute(db,"INSERT INTO inventory_entry_history(entry_id,revision,action,details,actor) SELECT id,revision,'canonical_entry_selected',JSON_OBJECT('canonical_entry_id',%s,'file_id',%s),'File manager' FROM inventory_entries WHERE id=%s",(primary['id'],f['id'],e['id']))
+ sync_duplicate_category_group(db,primary['id'])
 
 def auto_bind_wallpaper(db,f):
  import DownloaderLocations as D

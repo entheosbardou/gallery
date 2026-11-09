@@ -77,9 +77,13 @@ def finish(W,db,job,target):
   def patch(r):
    import CurrentLocations
    cleaned=CurrentLocations.clean(r);r.clear();r.update(cleaned)
-   if job.get('target_category'):r['category']=job['target_category']
+   if job.get('target_category'):r['category']=job['target_category'];r['duplicate_source_category']=job['target_category']
    else:r['collection_override']=target['collection_key'];r['download_collection']=target['collection_key']
-  if not W.update_entry(db,e['id'],patch,'collection_manually_assigned'):raise RuntimeError('The entry changed; retry the move.')
+  if not W.update_entry(db,e['id'],patch,'category_manually_assigned' if job.get('target_category') else 'collection_manually_assigned'):raise RuntimeError('The entry changed; retry the move.')
+  if job.get('target_category'):
+   linked=F.rows(db,"SELECT DISTINCT duplicate.id FROM fm_collection_move_files moved JOIN fm_entry_file_projection l ON l.file_id=moved.file_id JOIN inventory_entries duplicate ON duplicate.id=l.entry_id WHERE moved.move_id=%s AND duplicate.id<>%s AND duplicate.deleted_at IS NULL AND duplicate.status='duplicate' AND duplicate.is_hidden=TRUE AND duplicate.record_type='image'",(job['id'],e['id']))
+   for duplicate in linked:
+    if not W.update_entry(db,duplicate['id'],{'category':job['target_category'],'duplicate_source_category':job['target_category']},'shared_file_category_changed'):raise RuntimeError('A linked duplicate changed; retry the category move.')
   if not job.get('target_category'):F.execute(db,'UPDATE inventory_entries SET collection_id=%s WHERE id=%s',(target['id'],e['id']))
   # A parent move also reassigns its individual children; provenance stays intact.
   if not job.get('target_category'):F.execute(db,"UPDATE inventory_entries child JOIN inventory_entry_relations r ON r.related_entry_id=child.id SET child.collection_id=%s WHERE r.entry_id=%s AND r.relation_kind='parent_of'",(target['id'],e['id']))
