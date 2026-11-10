@@ -13,8 +13,8 @@ function show(component,data,checked){
  if(component==='worker'){
   const worker=data||{},age=worker.updated_utc?Date.now()-date(worker.updated_utc).getTime():Infinity,stale=!Number.isFinite(age)||age>120000;
   node('worker-updated').textContent=stamp(worker.updated_utc);
-  state('worker-state',stale?'No recent worker update':worker.phase==='error'?'Worker reported an error':Number(worker.pending_work)>0?`${number(worker.pending_work)} file jobs waiting`:Number(worker.recovery_total)>0?`Recovery pass: ${number(worker.recovery_processed)} of ${number(worker.recovery_total)}`:worker.phase==='complete'?'Last worker pass completed':'Current operation not recorded',stale||worker.phase==='error'?'bad':worker.phase==='scanning'?'busy':'ok');
-  node('worker-message').textContent=`Last message: ${worker.message||'None recorded'}. File jobs waiting: ${number(worker.pending_work)}. Index changes waiting: ${number(worker.pending_index)}. Failed file jobs: ${number(worker.failed_count)}.`;
+  state('worker-state',stale?'No recent worker update':worker.phase==='error'?'Worker reported an error':worker.message||'No current stage reported',stale||worker.phase==='error'?'bad':worker.phase==='scanning'?'busy':'ok');
+  node('worker-message').textContent=`${worker.files_checked!=null?`${number(worker.files_checked)} saved files checked · `:''}${worker.total?`${number(worker.processed)} of ${number(worker.total)} processed · `:''}File jobs waiting: ${number(worker.pending_work)} · Index changes waiting: ${number(worker.pending_index)} · Failed file jobs: ${number(worker.failed_count)}.`;
   const pipeline=worker.visual_worker_limit!=null;node('pipeline-status').hidden=!pipeline;node('pipeline-status').textContent=pipeline?`Visual comparisons: ${number(worker.visual_active)} active of ${number(worker.visual_worker_limit)} allowed, ${number(worker.visual_waiting)} waiting${worker.visual_per_minute!=null?' · '+number(worker.visual_per_minute)+'/min completed':''}. File changes: ${number(worker.file_changes_active)} active of ${number(worker.file_change_worker_limit)} allowed, ${number(worker.file_changes_waiting)} waiting${worker.file_changes_per_minute!=null?' · '+number(worker.file_changes_per_minute)+'/min completed':''}. Indexing: ${number(worker.index_active)} active of ${number(worker.index_worker_limit)} workers, ${number(worker.pending_index)} changes waiting${worker.indexed_per_minute!=null?' · '+number(worker.indexed_per_minute)+'/min completed':''}.`:'';
   node('freshness').textContent=stale?'No update from the worker in the last 2 minutes. This does not confirm it is running.':'Worker reported an update within the last 2 minutes.';
   const recovering=Number(worker.recovery_total||0)>0;node('recovery-progress').hidden=!recovering;node('recovery-progress-text').textContent=recovering?`File recovery pass: ${number(worker.recovery_processed)} of ${number(worker.recovery_total)} checked · ${number(worker.recovery_review)} need review`:'';if(recovering){node('recovery-progress').max=worker.recovery_total;node('recovery-progress').value=Math.min(worker.recovery_processed||0,worker.recovery_total)}
@@ -29,7 +29,7 @@ function show(component,data,checked){
  }else if(component==='moves'){
   node('moves-pending').textContent=number(count(data.counts,'pending'));node('moves-running').textContent=number(count(data.counts,'running'));node('moves-failed').textContent=number(count(data.counts,'failed'));
   const box=node('move-items');box.replaceChildren();if(!data.items?.length){const p=document.createElement('p');p.textContent='No queued, running, or failed collection moves.';box.append(p)}
-  for(const job of data.items||[]){const section=document.createElement('section');section.className='row';const info=document.createElement('div');const title=document.createElement('strong');title.textContent=`${job.state==='pending'?'Queued':job.state==='running'?'Running':'Failed'} move #${job.id}: ${job.source_id||'entry '+job.entry_id} → ${job.target_collection}`;const detail=document.createElement('p');detail.textContent=`Files moved: ${number(job.processed)} of ${number(job.total)}${job.error?' · Reason: '+job.error:''}`;info.append(title,detail);section.append(info);if(job.state==='failed'){const retry=document.createElement('button');retry.type='button';retry.textContent='Retry move';retry.onclick=async()=>{retry.disabled=true;detail.textContent='Requesting retry…';try{const response=await fetch('/api/move-entry',{method:'POST',headers:{'Content-Type':'application/json','X-Gallery-Request':'1'},body:JSON.stringify({entry_id:job.entry_id,revision:job.current_revision,target_collection:job.target_collection})});const result=await response.json();if(!response.ok)throw Error(result.error||'Retry failed');detail.textContent='Retry queued.';refresh('moves')}catch(error){detail.textContent=error.message;retry.disabled=false}};section.append(retry)}box.append(section)}
+  for(const job of data.items||[]){const section=document.createElement('section');section.className='row';const info=document.createElement('div');const title=document.createElement('strong');title.textContent=`${job.state==='pending'?'Queued':job.state==='running'?'Running':'Failed'} move #${job.id}: ${job.source_id||'entry '+job.entry_id} → ${job.target_collection}`;const detail=document.createElement('p');detail.textContent=`Files moved: ${number(job.processed)} of ${number(job.total)}${job.error?' · Reason: '+job.error:''}`;info.append(title,detail);section.append(info);if(job.state==='failed'){const retry=document.createElement('button');retry.type='button';retry.textContent='Retry move';retry.onclick=async()=>{retry.disabled=true;detail.textContent='Requesting retry…';try{const response=await fetch('/api/retry-failed-move',{method:'POST',headers:{'Content-Type':'application/json','X-Gallery-Request':'1'},body:JSON.stringify({id:job.id})});const result=await response.json();if(!response.ok)throw Error(result.error||'Retry failed');detail.textContent=result.message;refresh('moves')}catch(error){detail.textContent=error.message;retry.disabled=false}};section.append(retry)}box.append(section)}
   (data.items||[]).forEach((job,index)=>{if(job.state!=='failed')return;const section=box.children[index];if(!section)return;const button=document.createElement('button');button.type='button';button.textContent='Withdraw unstarted move';button.onclick=async()=>{button.disabled=true;const detail=section.querySelector('p');detail.textContent='Checking whether this move changed any files…';try{const response=await fetch('/api/withdraw-failed-move',{method:'POST',headers:{'Content-Type':'application/json','X-Gallery-Request':'1'},body:JSON.stringify({id:job.id})});const result=await response.json();if(!response.ok)throw Error(result.error||'Withdrawal failed');detail.textContent=result.message;refresh('moves')}catch(error){detail.textContent=error.message;button.disabled=false}};section.append(button)});
   node('move-recent').replaceChildren(...(data.recent||[]).map(job=>{const li=document.createElement('li');li.textContent=`Move #${job.id} · entry ${job.source_id||job.entry_id} → ${job.target_collection} · completed ${stamp(job.completed_at)}`;return li}));
  }else if(component==='recovery'){
@@ -144,4 +144,50 @@ async function loadFailedJobs(reset=false){
 node('failed-jobs-open').onclick=()=>{node('failed-jobs-dialog').showModal();loadFailedJobs(true)};
 node('failed-jobs-close').onclick=()=>node('failed-jobs-dialog').close();
 node('failed-jobs-more').onclick=()=>loadFailedJobs();
+let moveQueueBefore='',moveQueueBusy=false;
+async function loadMoveQueue(reset=false){
+ if(moveQueueBusy)return;moveQueueBusy=true;
+ if(reset){moveQueueBefore='';node('move-queue-items').replaceChildren()}
+ const state=node('move-queue-state').value;node('move-queue-summary').textContent='Loading moves…';
+ try{
+  const response=await fetch('/api/move-queue?'+new URLSearchParams({state,...(moveQueueBefore?{before:moveQueueBefore}:{})}),{headers:{'X-Gallery-Request':'1'},cache:'no-store'});
+  if(response.status===401){window.galleryStatusAuthRedirect();return}
+  const result=await response.json();if(!response.ok)throw Error(result.error||'Could not load moves');
+  const box=node('move-queue-items');
+  for(const job of result.items){
+   const row=document.createElement('section');row.className='failed-job';
+   const title=document.createElement('strong');title.textContent=`${job.state.toUpperCase()} move #${job.id} · ${job.site||'Entry'} ${job.source_id||job.entry_id} → ${job.target_collection}${job.target_category?' / '+job.target_category:''}`;
+   const detail=document.createElement('p');detail.textContent=`${number(job.completed_files)} of ${number(job.total_files)} files moved · Created ${stamp(job.created_at)}${job.error?' · Reason: '+job.error:''}`;
+   const actions=document.createElement('div');actions.className='toolbar';actions.style.justifyContent='flex-start';
+   const send=async(route,payload,button)=>{button.disabled=true;detail.textContent='Applying your choice…';try{const response=await fetch('/api/'+route,{method:'POST',headers:{'Content-Type':'application/json','X-Gallery-Request':'1'},body:JSON.stringify(payload)});const answer=await response.json();if(!response.ok)throw Error(answer.error||'Action failed');detail.textContent=answer.message;refresh('moves');loadMoveQueue(true)}catch(error){detail.textContent=error.message;button.disabled=false}};
+   if(job.state==='failed'){
+    const retry=document.createElement('button');retry.type='button';retry.textContent='Retry move';retry.onclick=()=>send('retry-failed-move',{id:job.id},retry);actions.append(retry);
+    if(Number(job.total_files)>0&&Number(job.completed_files)===Number(job.total_files)){
+     const finish=document.createElement('button');finish.type='button';finish.textContent='Finish completed files';let reviewed=false;finish.onclick=()=>{if(!reviewed){reviewed=true;finish.textContent='Confirm finish';detail.textContent+=` Your decision will finish this move’s entry details for the ${number(job.completed_files)} files already moved.`;return}send('finish-failed-move',{id:job.id,revision:job.current_revision},finish)};actions.append(finish);
+    }
+    if(Number(job.started_operations)===0){const withdraw=document.createElement('button');withdraw.type='button';withdraw.textContent='Withdraw unstarted move';withdraw.onclick=()=>send('withdraw-failed-move',{id:job.id},withdraw);actions.append(withdraw)}
+    if(job.first_operation_id){const review=document.createElement('button');review.type='button';review.textContent='Review file operation #'+job.first_operation_id;review.onclick=()=>{node('move-queue-dialog').close();node('recovery-find-id').value=job.first_operation_id;node('review-recovery').click()};actions.append(review)}
+   }
+   row.append(title,detail,actions);box.append(row);
+  }
+  moveQueueBefore=result.next_before?String(result.next_before):'';node('move-queue-more').hidden=!moveQueueBefore;
+  node('move-queue-summary').textContent=`${number(result.total)} ${state==='all'?'open':state} moves · ${number(box.children.length)} shown.`;
+  node('move-queue-retry-all').hidden=state!=='failed'||Number(result.total)===0;
+  if(!result.items.length&&!box.children.length)box.append(document.createTextNode('No moves in this state.'));
+ }catch(error){node('move-queue-summary').textContent=error.message}
+ finally{moveQueueBusy=false}
+}
+function resetRetryAll(){const button=node('move-queue-retry-all');button.dataset.confirm='';button.textContent='Retry all failed moves'}
+node('move-queue-open').onclick=()=>{resetRetryAll();node('move-queue-state').value='failed';node('move-queue-dialog').showModal();loadMoveQueue(true)};
+node('move-queue-close').onclick=()=>{resetRetryAll();node('move-queue-dialog').close()};
+node('move-queue-state').onchange=()=>{resetRetryAll();loadMoveQueue(true)};
+node('move-queue-more').onclick=()=>loadMoveQueue();
+node('move-queue-retry-all').onclick=async()=>{
+ const button=node('move-queue-retry-all'),summary=node('move-queue-summary');
+ if(button.dataset.confirm!=='yes'){button.dataset.confirm='yes';button.textContent='Confirm retry all failed moves';summary.textContent='This queues every failed collection and category move for the automated worker to check again. Reviewed manual finish decisions stay queued separately.';return}
+ button.disabled=true;summary.textContent='Queuing all eligible failed moves…';
+ try{const response=await fetch('/api/retry-all-failed-moves',{method:'POST',headers:{'Content-Type':'application/json','X-Gallery-Request':'1'},body:'{}'});const result=await response.json();if(!response.ok)throw Error(result.error||'Could not retry moves');button.dataset.confirm='';button.textContent='Retry all failed moves';summary.textContent=result.message;refresh('moves');await loadMoveQueue(true)}
+ catch(error){summary.textContent=error.message}
+ finally{button.disabled=false}
+};
 for(const button of document.querySelectorAll('[data-action]'))button.addEventListener('click',async()=>{const route=button.dataset.action,output=node(route==='retry-scan-issues'||route==='clear-scan-issues'?'issues-action-message':'maintenance-message');button.disabled=true;output.textContent='Requesting '+button.textContent.toLowerCase()+'…';try{const response=await fetch('/api/'+route,{method:'POST',headers:{'Content-Type':'application/json','X-Gallery-Request':'1'},body:'{}'});const result=await response.json();if(!response.ok)throw Error(result.error||'Request failed');output.textContent='Request accepted. Status will update as the worker reports progress.';refresh('worker');refresh('issues');}catch(error){output.textContent=error.message}finally{button.disabled=false}});

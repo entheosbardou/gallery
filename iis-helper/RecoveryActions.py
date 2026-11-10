@@ -52,7 +52,7 @@ def resolve_reviewed_duplicate(W,db,request,key):
 def same_plan(a,b):
  return all(a.get(k)==b.get(k) for k in ('source_file_id','target_file_id','source_path','target_path'))
 
-def verify_originals(W,db,op):
+def verify_originals(W,db,op,request):
  files=[]
  for side in ('source','target'):
   rows=W.q(db,'SELECT * FROM files WHERE id=%s',(op[side+'_file_id'],))
@@ -61,34 +61,71 @@ def verify_originals(W,db,op):
   if f['canonical_file_id'] or f['relative_path']!=op[side+'_path']:
    raise RuntimeError('These copies have already been moved or merged. Use the saved-copy resolution or retry cleanup to reconcile their current locations.')
   path=W.safe(op[side+'_path'])
+  reviewed=request.get('reviewed_'+side+'_sha256','').lower()
+  if not re.fullmatch('[0-9a-f]{64}',reviewed):raise RuntimeError('Review both current files before applying this decision.')
   with W.protected(path) as stream:
-   if W.hashstream(stream)!=bytes(op[side+'_sha256']):raise RuntimeError('The '+side+' copy changed since this cleanup was planned. No decision was applied.')
+   if W.hashstream(stream).hex()!=reviewed:raise RuntimeError('The '+side+' copy changed since your review. Review it again.')
   files.append(f)
  return files
+
+def finish_reviewed_move(W,db,op,request):
+ import CollectionMoves as C
+ import FileManager as F
+ with F.asset_write_lock:
+  linked=W.q(db,'SELECT move_id,file_id,state FROM fm_collection_move_files WHERE operation_id=%s',(op['id'],))
+  if len(linked)!=1 or linked[0]['state']!='pending':raise RuntimeError('This move changed. Review it again.')
+  found=W.q(db,'SELECT * FROM fm_collection_moves WHERE id=%s',(linked[0]['move_id'],))
+  if len(found)!=1 or found[0]['state']!='failed':raise RuntimeError('This move is no longer failed. Refresh it.')
+  job=found[0]
+  setting=W.q(db,'SELECT value FROM gallery_state WHERE state_key=%s',('category_move:'+str(job['id']),))
+  if setting:job['target_category']=W.decode(setting[0]['value'])['category']
+  target=W.q(db,'SELECT id,collection_key FROM collections WHERE id=%s',(job['target_collection_id'],))
+  if len(target)!=1:raise RuntimeError('The target collection is unavailable.')
+  source=W.safe(op['source_path']);dest=W.safe(op['target_path'])
+  expected=request.get('reviewed_source_sha256','').lower()
+  if not re.fullmatch('[0-9a-f]{64}',expected):raise RuntimeError('Review the original file before finishing this move.')
+  with W.protected(source,True) as original:
+   if W.hashstream(original).hex()!=expected:raise RuntimeError('The original changed since your review. Review it again.')
+   if dest.exists():
+    reviewed_target=request.get('reviewed_target_sha256','').lower()
+    if not re.fullmatch('[0-9a-f]{64}',reviewed_target):raise RuntimeError('Review the destination copy before replacing it.')
+    with W.protected(dest,True) as previous:
+     if W.hashstream(previous).hex()!=reviewed_target:raise RuntimeError('The destination changed since your review. Review it again.')
+     W.delete_protected(previous)
+   elif request.get('reviewed_target_sha256'):raise RuntimeError('The destination changed since your review. Review it again.')
+  W.run(db,'UPDATE file_operations SET source_sha256=%s,target_sha256=%s WHERE id=%s',(bytes.fromhex(expected),bytes.fromhex(expected),op['id']))
+  C.move_file(W,db,job,linked[0],target[0])
+  if not W.q(db,"SELECT file_id FROM fm_collection_move_files WHERE move_id=%s AND state='pending' LIMIT 1",(job['id'],)):C.finish(W,db,job,target[0])
+  else:W.run(db,"UPDATE fm_collection_moves SET state='pending',error=NULL WHERE id=%s",(job['id'],))
+  return 'Your reviewed file was moved and its category updated.'
 
 def apply(W,db,op,request):
  choice=request['choice']
  if choice=='retry':
   W.run(db,"UPDATE file_operations SET error=NULL,state=IF(state='error','planned',state) WHERE id=%s",(op['id'],))
   W.recover(db,operation_id=op['id'])
+ elif choice=='finish_move_manual':
+  if op['operation_kind']!='organize':raise RuntimeError('This decision applies to file moves only.')
+  return finish_reviewed_move(W,db,op,request)
  elif choice in ('first','second','both','cancel_move'):
   is_move=op['operation_kind']=='organize'
   if choice=='cancel_move':
    if not is_move:raise RuntimeError('Keeping the original location applies to a move only.')
    path=W.safe(op['source_path'])
+   reviewed=request.get('reviewed_source_sha256','').lower()
+   if not re.fullmatch('[0-9a-f]{64}',reviewed):raise RuntimeError('Review the original file before cancelling this move.')
    with W.protected(path) as stream:
-    if W.hashstream(stream)!=bytes(op['source_sha256']):raise RuntimeError('The original file changed; the move was not cancelled.')
+    if W.hashstream(stream).hex()!=reviewed:raise RuntimeError('The original file changed since your review. Review it again.')
    current=W.q(db,'SELECT * FROM files WHERE id=%s',(op['source_file_id'],))[0]
    if current['relative_path']!=op['source_path'] or current['canonical_file_id']:raise RuntimeError('The move already updated its links. Finish the move instead.')
    if W.safe(op['target_path']).exists():raise RuntimeError('A destination copy already exists. Finish the move to verify and reconcile both locations.')
    W.run(db,"UPDATE file_operations SET state='cancelled',completed_at=UTC_TIMESTAMP(6) WHERE id=%s",(op['id'],))
    return 'Resolved. The verified original stays in its original location.'
   if is_move:raise RuntimeError('This is a file move. Choose Finish move or Keep original location.')
-  verify_originals(W,db,op)
+  originals=verify_originals(W,db,op,request)
   if W.q(db,'SELECT move_id FROM fm_collection_move_files WHERE operation_id=%s LIMIT 1',(op['id'],)):
    raise RuntimeError('This file belongs to a collection move. Retry the move instead of merging its files.')
   if choice=='both':
-   if bytes(op['source_sha256'])==bytes(op['target_sha256']):raise RuntimeError('These files are exact duplicates. Choose one saved copy to keep.')
    db.begin()
    try:
     W.run(db,"UPDATE duplicate_matches SET review_state='rejected' WHERE file_id_low=%s AND file_id_high=%s",(min(op['source_file_id'],op['target_file_id']),max(op['source_file_id'],op['target_file_id'])))
@@ -96,11 +133,14 @@ def apply(W,db,op,request):
     db.commit()
    except Exception:db.rollback();raise
    return 'Resolved. Both verified files are kept, with their existing records.'
-  if choice=='first':
-   # Values come from the verified snapshot, avoiding MySQL assignment-order swaps.
-   W.run(db,"UPDATE file_operations SET source_file_id=%s,target_file_id=%s,source_path=%s,target_path=%s,source_sha256=%s,target_sha256=%s,state='planned',error=NULL WHERE id=%s",(op['target_file_id'],op['source_file_id'],op['target_path'],op['source_path'],op['target_sha256'],op['source_sha256'],op['id']))
-  else:W.run(db,"UPDATE file_operations SET state='planned',error=NULL WHERE id=%s",(op['id'],))
-  W.recover(db,operation_id=op['id'])
+  discard,keeper=(originals[1],originals[0]) if choice=='first' else (originals[0],originals[1])
+  discard_path=W.safe(discard['relative_path']);keeper_path=W.safe(keeper['relative_path'])
+  with W.protected(keeper_path) as kept,W.protected(discard_path,True) as removed:
+   if W.hashstream(kept).hex()!=request['reviewed_'+('source' if choice=='first' else 'target')+'_sha256'].lower() or W.hashstream(removed).hex()!=request['reviewed_'+('target' if choice=='first' else 'source')+'_sha256'].lower():raise RuntimeError('A copy changed since your review. Review it again.')
+   W.rewrite_path(db,discard,keeper,source_stream=removed,target_stream=kept)
+   W.run(db,"UPDATE file_operations SET source_file_id=%s,target_file_id=%s,source_path=%s,target_path=%s,source_sha256=%s,target_sha256=%s,state='linked',error=NULL WHERE id=%s",(discard['id'],keeper['id'],discard['relative_path'],keeper['relative_path'],bytes.fromhex(request['reviewed_'+('target' if choice=='first' else 'source')+'_sha256']),bytes.fromhex(request['reviewed_'+('source' if choice=='first' else 'target')+'_sha256']),op['id']))
+   W.delete_protected(removed)
+  W.run(db,"UPDATE file_operations SET state='complete',source_path='',target_path='',error=NULL,completed_at=UTC_TIMESTAMP(6) WHERE id=%s",(op['id'],))
  elif choice in ('restore','locate'):
   side=request.get('side','source')
   if side not in ('source','target'):raise RuntimeError('Choose the first or second copy to restore.')
@@ -114,10 +154,10 @@ def apply(W,db,op,request):
    # The existing per-operation backup store is outside the library.
    folder=W.backup_folder(op['id'],0)
    candidates=[folder/dest.name,folder/(str(op[side+'_file_id'])+'-'+dest.name)]
-   source=next((p for p in candidates if p.is_file() and W.filehash(p)==bytes(op[side+'_sha256'])),candidates[0])
+   source=next((p for p in candidates if p.is_file()),candidates[0])
    if not source.is_file():raise RuntimeError('No backup of this copy exists for this issue. Locate an existing copy or restore it from your NAS backup, then retry.')
   with W.protected(source) as stream:
-   if W.hashstream(stream)!=bytes(op[side+'_sha256']):raise RuntimeError('This copy does not match the missing image. It was not restored.')
+   reviewed_hash=W.hashstream(stream)
    stream.seek(0);dest.parent.mkdir(parents=True,exist_ok=True)
    # Exclusive creation prevents replacing any file created since the check.
    try:
@@ -126,11 +166,11 @@ def apply(W,db,op,request):
    except Exception:
     # Retain even a partial file for explicit review; never overwrite or delete it.
     raise
-  if W.filehash(dest)!=bytes(op[side+'_sha256']):raise RuntimeError('Restored copy failed verification. Review it before continuing.')
-  return 'Copy restored and verified. Now choose which copy to keep, or retry cleanup.'
+  if W.filehash(dest)!=reviewed_hash:raise RuntimeError('Restored copy changed during transfer. Review it before continuing.')
+  return 'Selected copy restored and verified against its source. Now choose which copy to keep.'
  else:raise RuntimeError('Choose a supported resolution.')
  result=W.q(db,'SELECT state,error FROM file_operations WHERE id=%s',(op['id'],))[0]
- if result['state'] in ('complete','cancelled'):return 'Resolved. Cleanup finished, linked records were updated, and the removed copy was backed up.'
+ if result['state'] in ('complete','cancelled'):return 'Resolved. Your reviewed choice was applied and the redundant physical copy was removed.'
  message=result['error'] or 'Cleanup is blocked by a downloader connection or collection move. Check the integration connection, then retry.'
  W.run(db,"UPDATE file_operations SET state='error',error=%s WHERE id=%s",(message,op['id']))
  raise RuntimeError(message)

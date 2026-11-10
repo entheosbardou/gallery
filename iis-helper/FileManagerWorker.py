@@ -183,8 +183,11 @@ def reconcile(W,db):
   relative=path.relative_to(W.ROOT).as_posix();owner=next((k for k in order if k=='.' or relative.casefold().startswith(k.casefold()+'/')),None)
   if owner is None or time.time()-st.st_mtime<3:continue
   pending.append((relative,W.pathkey(relative),st.st_size,W.ticks(st),path.name));count+=1
-  if len(pending)>=500:flush()
+  if len(pending)>=500:
+   flush()
+   W.progress(db,'Checking saved files',count,0,files_checked=count)
  flush()
+ W.progress(db,'File check complete',count,count,files_checked=count)
  # Executed only after every accessible directory was successfully traversed.
  if active:
   ids=[owners[k] for k in active]

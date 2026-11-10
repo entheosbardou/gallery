@@ -1,6 +1,6 @@
 """Journaled entry reassignment and verified physical file moves."""
 from pathlib import Path
-import json,hashlib,shutil
+import json,hashlib,shutil,time,random
 import FileManager as F
 import FileManagerWorker as M
 
@@ -54,6 +54,19 @@ def move_file(W,db,job,item,target):
  if source.exists():
   with W.protected(source,True) as original:
    if W.hashstream(original)!=digest:raise RuntimeError('Source changed after the move was queued; original retained.')
+   if dest.exists():
+    with W.protected(dest,True) as previous:
+     if W.hashstream(previous)!=digest:
+      previous.seek(0);original.seek(0)
+      partial_size=dest.stat().st_size;source_size=source.stat().st_size
+      if not (0<partial_size<source_size):raise RuntimeError('Destination checksum differs; original retained.')
+      remaining=partial_size
+      while remaining:
+       count=min(1024*1024,remaining)
+       if previous.read(count)!=original.read(count):raise RuntimeError('Destination checksum differs; original retained.')
+       remaining-=count
+      W.delete_protected(previous)
+    original.seek(0)
    if not dest.exists():
     with dest.open('xb') as output:shutil.copyfileobj(original,output)
     shutil.copystat(source,dest)
@@ -67,7 +80,7 @@ def move_file(W,db,job,item,target):
  F.execute(db,"UPDATE file_operations SET state='complete',source_path='',target_path='',error=NULL,completed_at=UTC_TIMESTAMP(6) WHERE id=%s",(op['id'],))
  F.execute(db,"UPDATE fm_collection_move_files SET state='completed' WHERE move_id=%s AND file_id=%s",(job['id'],f['id']))
 
-def finish(W,db,job,target):
+def finish_unlocked(W,db,job,target):
  db.begin()
  try:
   row=F.rows(db,'SELECT e.*,c.collection_key owner FROM inventory_entries e JOIN inventory_documents d ON d.id=e.inventory_document_id JOIN collections c ON c.id=e.collection_id WHERE e.id=%s AND e.deleted_at IS NULL FOR UPDATE',(job['entry_id'],))
@@ -90,7 +103,44 @@ def finish(W,db,job,target):
   F.execute(db,"UPDATE fm_collection_moves SET state='completed',source_collection_id=NULL,error=NULL,completed_at=UTC_TIMESTAMP(6) WHERE id=%s",(job['id'],));db.commit()
  except Exception:db.rollback();raise
 
+def finish(W,db,job,target):
+ with F.asset_write_lock:return finish_unlocked(W,db,job,target)
+
+def finish_reviewed(W,db):
+ requests=F.rows(db,"SELECT state_key,value FROM gallery_state WHERE state_key LIKE 'manual_finish_move:%%' AND JSON_UNQUOTE(JSON_EXTRACT(value,'$.status'))='pending' ORDER BY state_key LIMIT 1")
+ if not requests:return False
+ row=requests[0];decision=W.decode(row['value'])
+ try:
+  W.require_root()
+  found=F.rows(db,'SELECT * FROM fm_collection_moves WHERE id=%s',(decision['move_id'],))
+  if len(found)!=1:raise RuntimeError('This move no longer exists. Review it again.')
+  job=found[0]
+  if job['state']=='completed':decision.update(status='done',message='Move already completed.')
+  else:
+   if job['state']!='failed' or job['entry_id']!=decision['entry_id'] or job['target_collection_id']!=decision['target_collection_id']:raise RuntimeError('This move changed. Review it again.')
+   entry=F.rows(db,'SELECT revision FROM inventory_entries WHERE id=%s AND deleted_at IS NULL',(job['entry_id'],))
+   if len(entry)!=1 or entry[0]['revision']!=decision['revision']:raise RuntimeError('This entry changed. Review the move again.')
+   target=F.rows(db,'SELECT id,collection_key FROM collections WHERE id=%s',(job['target_collection_id'],))
+   if len(target)!=1:raise RuntimeError('The destination collection is missing.')
+   setting=F.rows(db,'SELECT value FROM gallery_state WHERE state_key=%s',('category_move:'+str(job['id']),))
+   if setting:job['target_category']=W.decode(setting[0]['value'])['category']
+   files=F.rows(db,'SELECT mf.state,mf.operation_id,f.relative_path,f.is_present,f.canonical_file_id,c.collection_key owner FROM fm_collection_move_files mf JOIN fm_file_catalog f ON f.id=mf.file_id JOIN collections c ON c.id=f.collection_id WHERE mf.move_id=%s',(job['id'],))
+   if not files or any(f['state']!='completed' or not f['is_present'] or f['canonical_file_id'] or not W.safe(f['relative_path']).is_file() for f in files):raise RuntimeError('A moved file is not present. Review its file operation.')
+   if job.get('target_category'):
+    if any(W.path_category(f['relative_path'],f['owner'])!=job['target_category'] for f in files):raise RuntimeError('A file is in a different category. Review its current location.')
+   elif any(f['owner']!=target[0]['collection_key'] for f in files):raise RuntimeError('A file is in a different collection. Review its current location.')
+   operations=[f['operation_id'] for f in files if f['operation_id']]
+   if operations and F.rows(db,"SELECT id FROM file_operations WHERE id IN ("+','.join(['%s']*len(operations))+") AND state<>'complete' LIMIT 1",operations):raise RuntimeError('A file operation is not complete. Review it first.')
+   finish(W,db,job,target[0]);decision.update(status='done',message='Files and entry details completed by your reviewed decision.')
+ except Exception as error:
+  db.rollback()
+  if getattr(error,'args',()) and error.args[0] in (1205,1213):decision.update(status='pending',message='Database was busy; your manual decision remains queued.')
+  else:decision.update(status='failed',message=str(error))
+ W.state(db,row['state_key'],decision)
+ return True
+
 def process(W,db):
+ if finish_reviewed(W,db):return True
  jobs=F.rows(db,"SELECT * FROM fm_collection_moves WHERE state IN ('pending','running') ORDER BY id LIMIT 1")
  if not jobs:return False
  job=jobs[0]
@@ -110,6 +160,15 @@ def process(W,db):
    if not M.can_manage(db,f['relative_path'],item['file_id'])[0]:raise RuntimeError('A downloader integration is not ready; files retained. Retry after its migration.')
   for item in files:move_file(W,db,job,item,target)
   if not F.rows(db,"SELECT file_id FROM fm_collection_move_files WHERE move_id=%s AND state='pending' LIMIT 1",(job['id'],)):finish(W,db,job,target)
+  W.run(db,'DELETE FROM gallery_state WHERE state_key=%s',('move_lock_retry:'+str(job['id']),))
   return True
  except Exception as error:
-  db.rollback();F.execute(db,"UPDATE fm_collection_moves SET state='failed',error=%s WHERE id=%s",(str(error),job['id']));return True
+  db.rollback()
+  if getattr(error,'args',()) and error.args[0] in (1205,1213):
+   key='move_lock_retry:'+str(job['id']);previous=W.state(db,key);attempt=int(previous.get('attempt',0))+1
+   if attempt<=8:
+    W.state(db,key,{'attempt':attempt,'error':str(error)})
+    F.execute(db,"UPDATE fm_collection_moves SET state='pending',error=%s WHERE id=%s",('Temporary database lock conflict; retrying',job['id']))
+    time.sleep(min(2.0,.1*2**attempt)+random.uniform(0,.2))
+    return True
+  F.execute(db,"UPDATE fm_collection_moves SET state='failed',error=%s WHERE id=%s",(str(error),job['id']));return True

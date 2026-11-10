@@ -53,10 +53,13 @@ public class GalleryHandler : IHttpHandler {
             if(route=="duplicates" && c.Request.HttpMethod=="GET") { Reply(c,200,Gallery.DuplicateStatus()); return; }
             if(route=="database-status" && c.Request.HttpMethod=="GET") { Reply(c,200,Gallery.DatabaseWorkerStatus()); return; }
             if(route=="system-status" && c.Request.HttpMethod=="GET") { if(!GalleryAuth.IsAdmin(c))throw new GalleryError(403,"Only administrators can view system status.");Reply(c,200,Gallery.DatabaseSystemComponent(c.Request.QueryString["component"]??""));return; }
+            if(route=="move-queue" && c.Request.HttpMethod=="GET") { if(!GalleryAuth.IsAdmin(c))throw new GalleryError(403,"Only administrators can view collection moves.");Reply(c,200,Gallery.DatabaseMoveQueue(c.Request.QueryString["state"]??"failed",c.Request.QueryString["before"]??""));return; }
             if(route=="failed-file-jobs" && c.Request.HttpMethod=="GET") { if(!GalleryAuth.IsAdmin(c))throw new GalleryError(403,"Only administrators can view failed file jobs.");Reply(c,200,Gallery.DatabaseFailedFileJobs(c.Request.QueryString["after"]??""));return; }
             if(route=="failed-file-job-review" && c.Request.HttpMethod=="GET") { if(!GalleryAuth.IsAdmin(c))throw new GalleryError(403,"Only administrators can review failed file jobs.");Reply(c,200,Gallery.DatabaseReviewFailedFileJob(c.Request.QueryString["id"]??""));return; }
             if(route=="recovery-action-status" && c.Request.HttpMethod=="GET") { if(!GalleryAuth.IsAdmin(c))throw new GalleryError(403,"Only administrators can review recovery decisions.");Reply(c,200,Gallery.DatabaseRecoveryActionStatus(c.Request.QueryString["ids"]??""));return; }
             if(route=="recovery-operations" && c.Request.HttpMethod=="GET") { if(!GalleryAuth.IsAdmin(c))throw new GalleryError(403,"Only gallery administrators can review file operations.");Reply(c,200,Gallery.DatabaseRecoveryOperations(c.Request.QueryString["id"]??"") );return; }
+            if(route=="recovery-survivor-proof" && c.Request.HttpMethod=="GET") { if(!GalleryAuth.IsAdmin(c))throw new GalleryError(403,"Only gallery administrators can review file operations.");Reply(c,200,Gallery.DatabaseRecoverySurvivorProof(c.Request.QueryString["id"]??""));return; }
+            if(route=="recovery-copies-proof" && c.Request.HttpMethod=="GET") { if(!GalleryAuth.IsAdmin(c))throw new GalleryError(403,"Only gallery administrators can review file operations.");Reply(c,200,Gallery.DatabaseRecoveryCopiesProof(c.Request.QueryString["id"]??""));return; }
             if(route=="retry-recovery-operation" && c.Request.HttpMethod=="POST") { if(!GalleryAuth.IsAdmin(c))throw new GalleryError(403,"Only gallery administrators can retry file operations.");Reply(c,202,Gallery.RequestDatabaseWorker());return; }
             if(route=="clear-scan-issues" && c.Request.HttpMethod=="POST") { Reply(c,200,Gallery.ClearDatabaseIssues()); return; }
             if(route=="retry-scan-issues" && c.Request.HttpMethod=="POST") { Reply(c,202,Gallery.RetryDatabaseIssues()); return; }
@@ -70,7 +73,6 @@ public class GalleryHandler : IHttpHandler {
             if(route=="recovery-action") { if(!GalleryAuth.IsAdmin(c))throw new GalleryError(403,"Only administrators can resolve recovery issues.");Reply(c,202,Gallery.DatabaseRecoveryAction(payload));return; }
             if(route=="resolve-superseded-recovery") { if(!GalleryAuth.IsAdmin(c))throw new GalleryError(403,"Only gallery administrators can resolve file operations.");Reply(c,200,Gallery.DatabaseResolveSupersededRecoveryOperation(payload));return; }
             if(route=="hold-recovery-operation") { if(!GalleryAuth.IsAdmin(c))throw new GalleryError(403,"Only gallery administrators can hold file operations.");Reply(c,200,Gallery.DatabaseHoldRecoveryOperation(payload));return; }
-            if(route=="keep-both-recovery") { if(!GalleryAuth.IsAdmin(c))throw new GalleryError(403,"Only gallery administrators can resolve file operations.");Reply(c,200,Gallery.DatabaseKeepBothRecoveryOperation(payload));return; }
             if(route=="export-inventory") { Reply(c,200,Gallery.ExportDatabaseInventory(Gallery.Text(payload,"collection")));return; }
             if(route=="import-updates") { Gallery.RequestDatabaseImportUpdates(); Reply(c,202,Gallery.RequestDatabaseWorker());return; }
             if(route=="duplicates") { Reply(c,202,Gallery.StartDuplicateScan()); return; }
@@ -81,6 +83,9 @@ public class GalleryHandler : IHttpHandler {
             if(route=="delete-entry") { Reply(c,200,Gallery.DeleteEntry(payload)); return; }
             if(route=="move-entry") {Reply(c,202,Gallery.DatabaseMoveEntry(payload));return;}
             if(route=="withdraw-failed-move") {if(!GalleryAuth.IsAdmin(c))throw new GalleryError(403,"Only administrators can withdraw failed moves.");Reply(c,200,Gallery.DatabaseWithdrawFailedMove(c,payload));return;}
+            if(route=="retry-failed-move") {if(!GalleryAuth.IsAdmin(c))throw new GalleryError(403,"Only administrators can retry failed moves.");Reply(c,202,Gallery.DatabaseRetryFailedMove(payload));return;}
+            if(route=="retry-all-failed-moves") {if(!GalleryAuth.IsAdmin(c))throw new GalleryError(403,"Only administrators can retry failed moves.");Reply(c,202,Gallery.DatabaseRetryAllFailedMoves());return;}
+            if(route=="finish-failed-move") {if(!GalleryAuth.IsAdmin(c))throw new GalleryError(403,"Only administrators can finish failed moves.");Reply(c,202,Gallery.DatabaseFinishFailedMove(c,payload));return;}
             if(route=="retry-failed-file-job") {if(!GalleryAuth.IsAdmin(c))throw new GalleryError(403,"Only administrators can retry file jobs.");Reply(c,202,Gallery.DatabaseRetryFailedFileJob(payload));return;}
             if(route=="resolve-failed-file-job") {if(!GalleryAuth.IsAdmin(c))throw new GalleryError(403,"Only administrators can resolve file jobs.");Reply(c,202,Gallery.DatabaseResolveFailedFileJob(c,payload));return;}
             if(route=="close-reviewed-file-job") {if(!GalleryAuth.IsAdmin(c))throw new GalleryError(403,"Only administrators can close reviewed file jobs.");Reply(c,200,Gallery.DatabaseCloseReviewedFileJob(c,payload));return;}

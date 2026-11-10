@@ -725,16 +725,36 @@ def recovery_file(db,file_id,recorded_path,expected):
 def close_superseded_duplicate(db,op):
  """Close an old dedupe plan after both IDs already resolve to one verified copy."""
  if op['operation_kind']!='deduplicate' or bytes(op['source_sha256'])!=bytes(op['target_sha256']):return False
- files=q(db,'SELECT id,canonical_file_id FROM files WHERE id IN (%s,%s)',(op['source_file_id'],op['target_file_id']))
+ files=q(db,'SELECT id,canonical_file_id,byte_size,modified_utc_ticks,width,height,color_signature,animation_signature,animation_loop,frame_count FROM files WHERE id IN (%s,%s)',(op['source_file_id'],op['target_file_id']))
  if len(files)!=2 or not files[0]['canonical_file_id'] or files[0]['canonical_file_id']!=files[1]['canonical_file_id']:return False
- survivor=q(db,'SELECT relative_path,is_present,canonical_file_id FROM files WHERE id=%s',(files[0]['canonical_file_id'],))
+ survivor=q(db,'SELECT id,relative_path,is_present,canonical_file_id,byte_size,modified_utc_ticks,width,height,color_signature,animation_signature,animation_loop,frame_count FROM files WHERE id=%s',(files[0]['canonical_file_id'],))
  if len(survivor)!=1 or not survivor[0]['is_present'] or survivor[0]['canonical_file_id']:return False
  if q(db,'SELECT id FROM inventory_entries WHERE file_id IN (%s,%s) LIMIT 1',(op['source_file_id'],op['target_file_id'])):return False
  if q(db,'SELECT file_id FROM fm_external_bindings WHERE file_id IN (%s,%s) LIMIT 1',(op['source_file_id'],op['target_file_id'])):return False
  for old in (op['source_path'],op['target_path']):
   if safe(old).exists():return False
  saved=safe(survivor[0]['relative_path'])
- if not saved.is_file() or filehash(saved)!=bytes(op['source_sha256']):return False
+ if not saved.is_file():return False
+ survivor_hash=filehash(saved)
+ st=saved.stat()
+ if st.st_size!=survivor[0]['byte_size'] or ticks(st)!=survivor[0]['modified_utc_ticks']:return False
+ if survivor_hash!=bytes(op['source_sha256']):
+  # The canonical copy may have different metadata bytes but the same rendered image.
+  records={f['id']:f for f in [*files,*survivor]}
+  ids=(op['source_file_id'],op['target_file_id'],survivor[0]['id'])
+  hashes=q(db,"SELECT file_id,hash_kind,hash_value,source_byte_size,source_modified_utc_ticks FROM file_hashes WHERE file_id IN (%s,%s,%s) AND algorithm_version='1' AND ((hash_kind='file_sha256' AND algorithm='sha256') OR (hash_kind='pixel_sha256' AND algorithm='pillow-rgba-frames-sha256'))",ids)
+  by_id={(h['file_id'],h['hash_kind']):h for h in hashes}
+  if len(by_id)!=6:return False
+  for fid in ids:
+   f=records[fid]
+   for kind in ('file_sha256','pixel_sha256'):
+    h=by_id[fid,kind]
+    if h['source_byte_size']!=f['byte_size'] or h['source_modified_utc_ticks']!=f['modified_utc_ticks']:return False
+  if any(bytes(by_id[fid,'file_sha256']['hash_value'])!=bytes(op['source_sha256']) for fid in ids[:2]):return False
+  if bytes(by_id[ids[2],'file_sha256']['hash_value'])!=survivor_hash:return False
+  if len({bytes(by_id[fid,'pixel_sha256']['hash_value']) for fid in ids})!=1:return False
+  render_fields=('width','height','color_signature','animation_signature','animation_loop','frame_count')
+  if len({tuple(records[fid][field] for field in render_fields) for fid in ids})!=1:return False
  run(db,"UPDATE file_operations SET state='cancelled',error='Superseded by verified surviving duplicate',completed_at=UTC_TIMESTAMP(6) WHERE id=%s AND state IN ('planned','copied','linked','error')",(op['id'],))
  return True
 
@@ -751,6 +771,8 @@ def recover(db,operation_id=None):
   if not fresh or fresh[0]['state'] in ('complete','cancelled'):continue
   op=fresh[0]
   if index%10==0:progress(db,'Recovering file operations',index,total,recovery_processed=index,recovery_total=total,recovery_review=review,issues=review_issues)
+  decision=state(db,'recovery_action:'+str(op['id']))
+  if decision.get('status') in ('pending','working') and decision.get('choice')!='retry':continue
   if op['state']=='error' and (op['error'] or '').startswith('On hold: '):continue
   try:
    if q(db,'SELECT move_id FROM fm_collection_move_files WHERE operation_id=%s LIMIT 1',(op['id'],)):continue

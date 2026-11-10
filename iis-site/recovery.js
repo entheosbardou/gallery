@@ -8,7 +8,7 @@ async function loadRecoveryOperations(){
  const selected=$('recovery-find-id').value.trim();
  const result=await api('recovery-operations'+(selected?'?id='+encodeURIComponent(selected):''));
  recoveryRemaining=result.total;
- $('recovery-summary').textContent=selected&&!result.items.length?'No open error remains for issue #'+selected+'.':result.total.toLocaleString()+' issues remain. Choose a resolution below.';
+ $('recovery-summary').textContent=selected?(result.items.length?'Reviewing operation #'+selected+'.':'No open move or file-operation error remains for #'+selected+'.'):result.total.toLocaleString()+' file-operation errors remain. Choose a resolution below.';
  const box=$('recovery-items');box.replaceChildren();recoveryRows.clear();
  for(const item of result.items){
   const section=el('section');section.style.cssText='padding:16px 0;border-bottom:1px solid var(--line)';
@@ -29,21 +29,32 @@ async function loadRecoveryOperations(){
    try{const answer=await api(route,{id:item.id,source_id:item.source_file_id,target_id:item.target_file_id,...payload});status.textContent=answer.message;recoveryRows.get(String(item.id)).waiting=true;await pollRecoveryActions();}
    catch(e){status.textContent=e.message;for(const button of actions.querySelectorAll('button'))button.disabled=false;}
   }
-  function action(label,choice){const button=el('button',label);button.type='button';button.onclick=()=>runChoice('recovery-action',{choice});actions.append(button);return button;}
-  if(isMove){action('Finish move','retry');action('Keep original location','cancel_move');}
+  function action(label,choice){const button=el('button',label);button.type='button';let reviewed=null;button.onclick=async()=>{
+   if(choice==='retry'){await runChoice('recovery-action',{choice});return;}
+   if(reviewed){await runChoice('recovery-action',{choice,reviewed_source_sha256:reviewed.source?.sha256||'',reviewed_target_sha256:reviewed.target?.sha256||''});return;}
+   button.disabled=true;status.textContent='Checking the copies for your review…';
+   try{const proof=await api('recovery-copies-proof?id='+encodeURIComponent(item.id));if(!proof.source||(!['cancel_move','finish_move_manual'].includes(choice)&&!proof.target))throw Error('A required copy is missing. Use the saved copy or restore a missing copy.');reviewed=proof;status.textContent=`Review the copies above.\nFirst: ${proof.source.path} · ${Number(proof.source.size).toLocaleString()} bytes · SHA-256 ${proof.source.sha256}`+(proof.target?`\nSecond: ${proof.target.path} · ${Number(proof.target.size).toLocaleString()} bytes · SHA-256 ${proof.target.sha256}`:'')+(choice==='finish_move_manual'?'\nYour choice will use the first copy, replace the second copy if present, update the file links and category, and remove the original. The current bytes shown here take precedence over the earlier worker checks.':'\nYour decision will override the automated match verdict.');button.textContent='Confirm: '+label;}
+   catch(e){status.textContent=e.message;}finally{button.disabled=false;}
+  };actions.append(button);return button;}
+  if(isMove){action('Use first copy and finish move','finish_move_manual');action('Keep original location','cancel_move');}
   else{action('Keep first copy','first');action('Keep second copy','second');if(!exactDuplicate)action('Keep both copies','both');}
-  action('Retry this cleanup','retry');
-  if(shared){const resolve=el('button','Use saved copy and resolve');resolve.type='button';resolve.onclick=()=>runChoice('resolve-superseded-recovery',{});actions.append(resolve);}
+  action(isMove?'Retry move with automatic checks':'Retry this cleanup','retry');
+  if(shared){const resolve=el('button','Use saved copy and resolve');resolve.type='button';let reviewed=null;resolve.onclick=async()=>{
+   if(reviewed){await runChoice('resolve-superseded-recovery',{reviewed_sha256:reviewed.sha256,reviewed_size:reviewed.size});return;}
+   resolve.disabled=true;status.textContent='Checking the selected saved file…';
+   try{const proof=await api('recovery-survivor-proof?id='+encodeURIComponent(item.id));if(proof.path!==item.survivor_path)throw Error('The saved file changed. Refresh this issue.');reviewed=proof;status.textContent=`Review the saved copy above. File: ${proof.path}\nSize: ${Number(proof.size).toLocaleString()} bytes\nSHA-256: ${proof.sha256}\nYour confirmation will close this cleanup using this file, even if automated hash or pixel checks disagree.`;resolve.textContent='Confirm my saved copy';}
+   catch(e){status.textContent=e.message;}finally{resolve.disabled=false;}
+  };actions.append(resolve);}
   const restore=el('details');restore.append(el('summary','Restore or locate a missing copy'));
   const side=el('select');side.setAttribute('aria-label','Copy to restore');for(const [value,label] of [['source','First copy'],['target','Second copy']]){const option=el('option',label);option.value=value;side.append(option)}
   const restoreButton=el('button','Restore selected copy from backup');restoreButton.type='button';restoreButton.onclick=()=>runChoice('recovery-action',{choice:'restore',side:side.value});
   const location=el('input');location.placeholder='Location relative to wallpaper storage';location.setAttribute('aria-label','Existing copy location');location.style.width='min(100%,600px)';
   const locateButton=el('button','Use this file to restore the missing copy');locateButton.type='button';locateButton.onclick=()=>runChoice('recovery-action',{choice:'locate',side:side.value,path:location.value});
-  restore.append(el('p','Gallery verifies that the backup or located file exactly matches the missing image, then restores it without replacing an existing file.'),side,restoreButton,location,locateButton);actions.append(restore);
+  restore.append(el('p','Gallery copies the file you select into the missing location and checks that the copy matches your selected source. It will not replace an existing file.'),side,restoreButton,location,locateButton);actions.append(restore);
   recoveryRows.set(String(item.id),{section,status,actions,waiting:false,lastError:item.error});
   // Each preview uses the normal permission-checked image endpoint.
   const previews=el('div');
-  const candidates=[['First copy',item.current_source_path,item.source_collection],['Second copy',item.current_target_path,item.target_collection],['Saved copy',item.survivor_path,item.survivor_collection]];
+  const candidates=[['First copy',item.current_source_path,item.source_collection],['Second copy',isMove?item.target_path:item.current_target_path,item.target_collection],['Saved copy',item.survivor_path,item.survivor_collection]];
   for(const [label,path,owner] of candidates){
    if(!path||!owner||(owner!=='.'&&!path.startsWith(owner+'/')))continue;
    const url='/api/image?'+new URLSearchParams({collection:owner,file:owner==='.'?path:path.slice(owner.length+1)});
