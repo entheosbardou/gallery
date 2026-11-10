@@ -14,3 +14,7 @@
 - Existing failed cleanup operations for the same pair must be resumed rather than multiplied. Remove stale duplicate backup copies only after the surviving file and every reference have been verified and all related operations are terminal.
 - Automatically close superseded duplicate operations when both retired IDs already point to one present survivor and neither old path or link remains. Verify actual survivor bytes against its indexed file hash, then accept either the operation's exact SHA-256 or matching indexed pixel hashes and render details across all three records. Keep the manual button for exceptional cases.
 - The one-time legacy duplicate-backup cleanup started on 2026-11-09 and may still be running. Its status is recorded in `PROJECT_STATUS.md`; do not infer completion from deployment. Once all posts and locations have been relinked to the canonical file, delete the obsolete `booru.files` row. Preserve the post and media records and their links to the surviving file.
+
+## Shared-file category moves
+
+- Category changes should update every entry linked to the physical file, including visible and non-image entries. The local source now shows linked entries, checks the reviewed set before moving, and updates every linked record when finishing. Deployed to bens-pc on 2026-11-09; authenticated use remains unverified.

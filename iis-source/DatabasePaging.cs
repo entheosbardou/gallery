@@ -227,12 +227,25 @@ public static partial class Gallery {
    if(Text(row,"category").ToLowerInvariant()==category)throw new GalleryError(400,"This image already has that category.");
    var files=DBRows(db,tx,"SELECT DISTINCT COALESCE(f.canonical_file_id,f.id) id FROM fm_entry_file_projection l JOIN fm_file_catalog f ON f.id=l.file_id WHERE l.entry_id=@id","@id",id);
    if(files.Count!=1)throw new GalleryError(409,"This entry does not have exactly one saved file. Review its file links first.");
-   if(DBRows(db,tx,"SELECT e.id FROM fm_entry_file_projection l JOIN inventory_entries e ON e.id=l.entry_id AND e.deleted_at IS NULL WHERE l.file_id=@file AND e.id<>@id AND (e.status<>'duplicate' OR e.is_hidden=FALSE OR e.record_type<>'image') LIMIT 1","@file",files[0]["id"],"@id",id).Count>0)throw new GalleryError(409,"This file is shared with another visible or non-image entry. Review its categories before moving it.");
+   var shared=DBRows(db,tx,"SELECT DISTINCT e.id,e.record_type,e.status FROM fm_entry_file_projection l JOIN inventory_entries e ON e.id=l.entry_id AND e.deleted_at IS NULL WHERE l.file_id=@file AND e.id<>@id AND (e.status<>'duplicate' OR e.is_hidden=FALSE OR e.record_type<>'image') ORDER BY e.id","@file",files[0]["id"],"@id",id);
+   if(shared.Count>0){
+    string reviewed=Text(payload,"shared_entry_ids");
+    if(reviewed!=String.Join(",",shared.Select(e=>Text(e,"id"))))throw new GalleryError(409,"This file is shared with other entries. Review them in the category dialog, then confirm changing all linked categories.");
+   }
    DBExec(db,tx,"INSERT INTO fm_collection_moves(entry_id,source_document_id,source_collection_id,target_collection_id) VALUES(@entry,@doc,@collection,@collection)","@entry",id,"@doc",row["inventory_document_id"],"@collection",row["collection_id"]);
    long job=Convert.ToInt64(DBRows(db,tx,"SELECT LAST_INSERT_ID() id")[0]["id"]);
    DBExec(db,tx,"INSERT INTO fm_collection_move_files(move_id,file_id) VALUES(@move,@file)","@move",job,"@file",files[0]["id"]);
-   DBExec(db,tx,"INSERT INTO gallery_state(state_key,value) VALUES(@key,@value)","@key","category_move:"+job,"@value",Json.Serialize(new{category=category}));
+   DBExec(db,tx,"INSERT INTO gallery_state(state_key,value) VALUES(@key,@value)","@key","category_move:"+job,"@value",Json.Serialize(new{category=category,shared_entry_ids=shared.Select(e=>Convert.ToInt64(e["id"])).ToArray()}));
    tx.Commit();return new{move_id=job,state="pending"};
+  }
+ }
+ public static object DatabaseCategoryLinks(HttpContext context){
+  long id;if(!Int64.TryParse(context.Request.QueryString["entry_id"],out id))throw new GalleryError(400,"Choose an image.");
+  using(var db=OpenDatabase()){
+   var files=DBRows(db,null,"SELECT DISTINCT COALESCE(f.canonical_file_id,f.id) id FROM fm_entry_file_projection l JOIN fm_file_catalog f ON f.id=l.file_id WHERE l.entry_id=@id","@id",id);
+   if(files.Count!=1)throw new GalleryError(409,"This entry does not have exactly one saved file.");
+   var linked=DBRows(db,null,"SELECT DISTINCT e.id,e.site,e.source_id,e.record_type,e.status,e.category,e.is_hidden,c.collection_key FROM fm_entry_file_projection l JOIN inventory_entries e ON e.id=l.entry_id AND e.deleted_at IS NULL JOIN collections c ON c.id=e.collection_id WHERE l.file_id=@file AND e.id<>@id ORDER BY e.id","@file",files[0]["id"],"@id",id);
+   return new{links=linked.Select(e=>new{id=e["id"],site=e["site"],source_id=e["source_id"],record_type=e["record_type"],status=e["status"],category=e["category"],hidden=e["is_hidden"],collection=e["collection_key"]}).ToArray(),review_ids=String.Join(",",linked.Where(e=>Text(e,"record_type")!="image"||Text(e,"status")!="duplicate"||!Convert.ToBoolean(e["is_hidden"])).Select(e=>Text(e,"id"))),has_non_image=linked.Any(e=>Text(e,"record_type")!="image")};
   }
  }
  public static object DatabaseMoveStatus(HttpContext context){

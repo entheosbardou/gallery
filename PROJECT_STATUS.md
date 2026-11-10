@@ -1,3 +1,14 @@
+## 2026-11-09 21:13 MST — Shared-file category changes deployed
+
+- Built the category release in an isolated copy. On-host validation passed, then deployed to bens-pc with backup at C:\downloads\gallery\change-backups\github-release-20261109-211304.
+- The deployed DLL, Gallery JavaScript and HTML, and category worker file matched the staged release hashes. IIS site and app pool were Started; the database worker task was Running. An unauthenticated page request returned 302 to sign-in, and the new category-links API returned 401 without a session.
+- An authenticated shared-file category move remains unverified. No production category was changed as a test. Source remains local and unpushed.
+
+## 2026-11-09 21:05 MST — Shared-file category moves prepared (source only)
+
+- Category changes now list every entry linked to the saved file and queue the move with the reviewed linked-entry IDs. The worker checks that set before moving the file, then updates the selected entry and every linked entry, including visible and non-image records, in the finishing transaction. Bulk category changes also supply the linked IDs. No schema change.
+- JavaScript and Python syntax checks and an isolated IIS release build passed. Live authenticated category changes and production deployment remain unverified. Changes are local and unpushed.
+
 ## 2026-11-06 18:32 MST — live conveyor check
 
 - Read-only `bens-pc` check: IIS site/pool were `Started`, the worker task was `Running`, and the worker reported at 18:31 MST. Completed image-match jobs rose from 33,539 at 17:22 MST to 38,282, about 68 per minute over the interval. Pending plus leased image-match jobs totaled 11,684. The entry and file index queues were both zero.
@@ -328,3 +339,9 @@ The original repository snapshot and later timestamped entries record evidence a
 - Move #1859's source was 1,091,016 bytes with its recorded SHA-256; its 1,048,576-byte destination was verified as an exact prefix of the source. The worker now removes an interrupted destination only when it is shorter and byte-for-byte identical to the start of the verified source, then recopies and checks the full destination. A genuinely different destination remains for review. Move #1017's source existed and its target did not; its earlier failure was a Windows file-in-use error. The worker still requires access before it can move and remove that original.
 - The move-list Review file operation buttons now open the corresponding planned operation even while the collection move is failed. The recovery dialog's missing summary element was restored. A new reviewed “Use first copy and finish move” choice binds to live SHA-256 evidence, can replace a reviewed destination, and directly finishes the move and category without rerunning the recorded hash verdict. “Retry move with automatic checks” remains separate.
 - Python/JavaScript syntax, isolated release build, diff check, and host validation passed. Deployment backups: `C:\downloads\gallery\change-backups\github-release-20261109-205544` and latest `C:\downloads\gallery\change-backups\github-release-20261109-205752`. The authenticated live dialog showed operation #32253 and the two current copy hashes before confirmation. No retry or manual confirmation was pressed; actual completion of #1859 and #1017 remains unverified.
+
+## 2026-11-09 21:09 MST — Moves #1859 and #1017 completed
+
+- The user identified #1017's lock as the image being used for their Windows background. After changing the background, the live database showed move #1017 and operation #31411 completed, with its entry categorized SFW. No Gallery workaround to bypass a Windows file lock was applied.
+- #1859 first hit a unique-path conflict after the destination copy had been indexed as another file record. Both physical copies were verified byte-identical. The worker now has a guarded merge path for an independently indexed destination, retaining database rows and one physical copy. Build, Python syntax, diff check, host validation, and deployment passed; backup `C:\downloads\gallery\change-backups\github-release-20261109-210853`.
+- A subsequent bounded live check showed move #1859 and operation #32253 completed; file #11697 now points to `anime/SAO/sfw/SAO - AlphaCoders 659284.png`, the transient file #33843341 is canonical to #11697 and not present, and all three linked entries use #11697 with the two local duplicates hidden. The original physical path was absent; the destination alone remained and its SHA-256 was `38C1EB99396E1166B6325783C79AF929E28BDD3C8BF234382893BC43922DB762`. The new guarded merge branch was not separately proven to be the path that completed this move; the observed result may also include the background duplicate pass's reconciliation.

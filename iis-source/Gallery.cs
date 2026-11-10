@@ -41,6 +41,7 @@ public class GalleryHandler : IHttpHandler {
             if(route=="inventory" && c.Request.HttpMethod=="GET") { if(c.Request.QueryString["rescan"]=="1")Gallery.RequestDatabaseWorker(); if(Gallery.PagedInventory){Reply(c,200,Gallery.DatabaseInventoryPage(c));return;} var inventory=Gallery.InventoryView(false);Reply(c,200,GalleryAuth.IsAdmin(c)?inventory:Gallery.AccessibleInventory(inventory,c)); return; }
             if(route=="inventory-count" && c.Request.HttpMethod=="GET" && Gallery.PagedInventory){Reply(c,200,Gallery.DatabaseInventoryCount(c));return;}
             if(route=="entry-files" && c.Request.HttpMethod=="GET"){Reply(c,200,Gallery.DatabaseEntryFiles(c));return;}
+            if(route=="category-links" && c.Request.HttpMethod=="GET"){if(!GalleryAuth.IsAdmin(c))throw new GalleryError(403,"Only administrators can review linked entries.");Reply(c,200,Gallery.DatabaseCategoryLinks(c));return;}
             if(route=="inventory-meta" && c.Request.HttpMethod=="GET"){Reply(c,200,Gallery.DatabaseInventoryMetadata(c));return;}
             if(route=="changes" && c.Request.HttpMethod=="GET"){Reply(c,200,Gallery.DatabaseChanges(c));return;}
             if(route=="asset" && c.Request.HttpMethod=="GET"){Reply(c,200,Gallery.DatabaseAsset(c));return;}

@@ -7,6 +7,20 @@ import FileManagerWorker as M
 def move_file(W,db,job,item,target):
  category_move=job.get('target_category')
  f=F.rows(db,'SELECT f.*,c.collection_key owner FROM fm_file_catalog f JOIN collections c ON c.id=f.collection_id WHERE f.id=%s',(item['file_id'],))[0]
+ if item['operation_id'] and f['canonical_file_id'] and not f['is_present']:
+  op=F.rows(db,'SELECT * FROM file_operations WHERE id=%s',(item['operation_id'],))[0]
+  if op['state']=='linked' and f['canonical_file_id']==op['target_file_id']:
+   kept=F.rows(db,'SELECT relative_path,is_present,canonical_file_id FROM files WHERE id=%s',(op['target_file_id'],))
+   if len(kept)!=1 or kept[0]['relative_path']!=op['target_path'] or not kept[0]['is_present'] or kept[0]['canonical_file_id']:raise RuntimeError('The retained file changed. Review the move again.')
+   if W.filehash(W.safe(op['target_path']))!=bytes(op['source_sha256']):raise RuntimeError('The retained file changed. Review the move again.')
+   old=W.safe(op['source_path'])
+   if old.exists():
+    with W.protected(old,True) as original:
+     if W.hashstream(original)!=bytes(op['source_sha256']):raise RuntimeError('The original changed. Review the move again.')
+     W.delete_protected(original)
+   F.execute(db,"UPDATE file_operations SET state='complete',source_path='',target_path='',error=NULL,completed_at=UTC_TIMESTAMP(6) WHERE id=%s",(op['id'],))
+   F.execute(db,"UPDATE fm_collection_move_files SET file_id=%s,state='completed' WHERE move_id=%s AND file_id=%s",(op['target_file_id'],job['id'],f['id']))
+   return
  if not f['is_present']:raise RuntimeError('A saved file is unavailable; reconnect storage and retry.')
  if not M.can_manage(db,f['relative_path'],f['id'])[0]:raise RuntimeError('The source downloader database must be ready before moving this file.')
  op=None
@@ -72,6 +86,27 @@ def move_file(W,db,job,item,target):
     shutil.copystat(source,dest)
    with W.protected(dest) as retained:
     if W.hashstream(retained)!=digest:raise RuntimeError('Destination checksum differs; original retained.')
+    owner=F.rows(db,'SELECT id,relative_path,is_present,canonical_file_id FROM files WHERE path_key=%s AND id<>%s',(W.pathkey(op['target_path']),f['id']))
+    if owner:
+     kept=owner[0]
+     if len(owner)!=1 or kept['relative_path']!=op['target_path'] or not kept['is_present'] or kept['canonical_file_id']:raise RuntimeError('The destination is linked to a different file record. Review its links.')
+     if F.rows(db,'SELECT id FROM fm_external_bindings WHERE file_id IN (%s,%s) LIMIT 1',(f['id'],kept['id'])):raise RuntimeError('The destination has downloader links. Review those links before merging the copies.')
+     with F.asset_write_lock:
+      db.begin()
+      try:
+       locked=F.rows(db,'SELECT id,relative_path,is_present,canonical_file_id FROM files WHERE id IN (%s,%s) ORDER BY id FOR UPDATE',(f['id'],kept['id']))
+       if len(locked)!=2 or any(x['relative_path']!=(op['source_path'] if x['id']==f['id'] else op['target_path']) or not x['is_present'] or x['canonical_file_id'] for x in locked):raise RuntimeError('A file link changed. Review the move again.')
+       F.execute(db,'UPDATE inventory_entries SET file_id=%s WHERE file_id=%s',(kept['id'],f['id']))
+       F.execute(db,'UPDATE files SET canonical_file_id=%s WHERE canonical_file_id=%s',(kept['id'],f['id']))
+       F.execute(db,'UPDATE files SET canonical_file_id=%s,is_present=FALSE WHERE id=%s',(kept['id'],f['id']))
+       F.execute(db,'INSERT INTO fm_file_placement(file_id,collection_id) VALUES(%s,%s) ON DUPLICATE KEY UPDATE collection_id=VALUES(collection_id)',(kept['id'],target['id']))
+       F.execute(db,"UPDATE file_operations SET target_file_id=%s,state='linked',error=NULL WHERE id=%s",(kept['id'],op['id']))
+       db.commit()
+      except Exception:db.rollback();raise
+     W.delete_protected(original)
+     F.execute(db,"UPDATE file_operations SET state='complete',source_path='',target_path='',error=NULL,completed_at=UTC_TIMESTAMP(6) WHERE id=%s",(op['id'],))
+     F.execute(db,"UPDATE fm_collection_move_files SET file_id=%s,state='completed' WHERE move_id=%s AND file_id=%s",(kept['id'],job['id'],f['id']))
+     return
     F.execute(db,"UPDATE file_operations SET state='copied' WHERE id=%s",(op['id'],));link(original,retained);W.delete_protected(original)
  else:
   with W.protected(dest) as retained:
@@ -94,9 +129,12 @@ def finish_unlocked(W,db,job,target):
    else:r['collection_override']=target['collection_key'];r['download_collection']=target['collection_key']
   if not W.update_entry(db,e['id'],patch,'category_manually_assigned' if job.get('target_category') else 'collection_manually_assigned'):raise RuntimeError('The entry changed; retry the move.')
   if job.get('target_category'):
-   linked=F.rows(db,"SELECT DISTINCT duplicate.id FROM fm_collection_move_files moved JOIN fm_entry_file_projection l ON l.file_id=moved.file_id JOIN inventory_entries duplicate ON duplicate.id=l.entry_id WHERE moved.move_id=%s AND duplicate.id<>%s AND duplicate.deleted_at IS NULL AND duplicate.status='duplicate' AND duplicate.is_hidden=TRUE AND duplicate.record_type='image'",(job['id'],e['id']))
+   linked=F.rows(db,"SELECT DISTINCT duplicate.id,duplicate.record_type,duplicate.status,duplicate.is_hidden FROM fm_collection_move_files moved JOIN fm_entry_file_projection l ON l.file_id=moved.file_id JOIN inventory_entries duplicate ON duplicate.id=l.entry_id WHERE moved.move_id=%s AND duplicate.id<>%s AND duplicate.deleted_at IS NULL",(job['id'],e['id']))
+   reviewed=sorted(int(x) for x in job.get('shared_entry_ids',[]))
+   actual=sorted(int(x['id']) for x in linked if x['record_type']!='image' or x['status']!='duplicate' or not x['is_hidden'])
+   if actual!=reviewed:raise RuntimeError('Linked entries changed after review. Review the shared file again.')
    for duplicate in linked:
-    if not W.update_entry(db,duplicate['id'],{'category':job['target_category'],'duplicate_source_category':job['target_category']},'shared_file_category_changed'):raise RuntimeError('A linked duplicate changed; retry the category move.')
+    if not W.update_entry(db,duplicate['id'],{'category':job['target_category'],'duplicate_source_category':job['target_category']},'shared_file_category_changed'):raise RuntimeError('A linked entry changed; retry the category move.')
   if not job.get('target_category'):F.execute(db,'UPDATE inventory_entries SET collection_id=%s WHERE id=%s',(target['id'],e['id']))
   # A parent move also reassigns its individual children; provenance stays intact.
   if not job.get('target_category'):F.execute(db,"UPDATE inventory_entries child JOIN inventory_entry_relations r ON r.related_entry_id=child.id SET child.collection_id=%s WHERE r.entry_id=%s AND r.relation_kind='parent_of'",(target['id'],e['id']))
@@ -123,7 +161,8 @@ def finish_reviewed(W,db):
    target=F.rows(db,'SELECT id,collection_key FROM collections WHERE id=%s',(job['target_collection_id'],))
    if len(target)!=1:raise RuntimeError('The destination collection is missing.')
    setting=F.rows(db,'SELECT value FROM gallery_state WHERE state_key=%s',('category_move:'+str(job['id']),))
-   if setting:job['target_category']=W.decode(setting[0]['value'])['category']
+   if setting:
+    choice=W.decode(setting[0]['value']);job['target_category']=choice['category'];job['shared_entry_ids']=choice.get('shared_entry_ids',[])
    files=F.rows(db,'SELECT mf.state,mf.operation_id,f.relative_path,f.is_present,f.canonical_file_id,c.collection_key owner FROM fm_collection_move_files mf JOIN fm_file_catalog f ON f.id=mf.file_id JOIN collections c ON c.id=f.collection_id WHERE mf.move_id=%s',(job['id'],))
    if not files or any(f['state']!='completed' or not f['is_present'] or f['canonical_file_id'] or not W.safe(f['relative_path']).is_file() for f in files):raise RuntimeError('A moved file is not present. Review its file operation.')
    if job.get('target_category'):
@@ -146,12 +185,17 @@ def process(W,db):
  job=jobs[0]
  try:
   setting=F.rows(db,'SELECT value FROM gallery_state WHERE state_key=%s',('category_move:'+str(job['id']),))
-  if setting:job['target_category']=json.loads(setting[0]['value'])['category']
+  if setting:
+   choice=json.loads(setting[0]['value']);job['target_category']=choice['category'];job['shared_entry_ids']=choice.get('shared_entry_ids',[])
   W.require_root();target=F.rows(db,'SELECT c.id,c.collection_key FROM collections c JOIN fm_collection_discovery m ON m.collection_id=c.id WHERE c.id=%s AND m.is_marked=TRUE',(job['target_collection_id'],))
   if not target or not (W.ROOT/target[0]['collection_key']/'_download-info').is_dir():raise RuntimeError('Destination collection marker is unavailable.')
   target=target[0]
   entry=F.rows(db,'SELECT collection_id FROM inventory_entries WHERE id=%s AND deleted_at IS NULL',(job['entry_id'],))
   if not entry or entry[0]['collection_id'] not in (job['source_collection_id'],target['id']):raise RuntimeError('The entry was reassigned while the move was pending; review before retrying.')
+  if job.get('target_category'):
+   linked=F.rows(db,"SELECT DISTINCT e.id,e.record_type,e.status,e.is_hidden FROM fm_collection_move_files moved JOIN fm_entry_file_projection l ON l.file_id=moved.file_id JOIN inventory_entries e ON e.id=l.entry_id WHERE moved.move_id=%s AND e.id<>%s AND e.deleted_at IS NULL",(job['id'],job['entry_id']))
+   actual=sorted(int(x['id']) for x in linked if x['record_type']!='image' or x['status']!='duplicate' or not x['is_hidden'])
+   if actual!=sorted(int(x) for x in job.get('shared_entry_ids',[])):raise RuntimeError('Linked entries changed after review. Review the shared file again.')
   F.execute(db,"UPDATE fm_collection_moves SET state='running',error=NULL WHERE id=%s",(job['id'],))
   files=F.rows(db,"SELECT * FROM fm_collection_move_files WHERE move_id=%s AND state='pending' ORDER BY file_id LIMIT 10",(job['id'],))
   # Validate all source-owner gates before starting this batch.
